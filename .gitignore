@@ -62,3 +62,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Qlty code quality tool
+.qlty/
