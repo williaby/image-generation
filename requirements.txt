@@ -1,0 +1,5 @@
+# Image Generation Dependencies
+# Install with: pip install -r requirements.txt
+
+# Google Gemini AI SDK for image generation
+google-genai>=0.4.0
