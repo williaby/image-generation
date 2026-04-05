@@ -433,28 +433,27 @@ def generate_image(
 
                     print(f"Thought image {thought_count} saved to: {thought_path}")
 
-            else:
-                # Non-thought content (final output)
-                if part.inline_data is not None:
-                    # Final image
-                    final_image_data = part.inline_data.data
-                    final_mime_type = part.inline_data.mime_type
+            # Non-thought content (final output)
+            elif part.inline_data is not None:
+                # Final image
+                final_image_data = part.inline_data.data
+                final_mime_type = part.inline_data.mime_type
 
-                    # Extract thought signature if available
-                    if hasattr(part, "thought_signature") and part.thought_signature:
-                        final_signature = part.thought_signature
-                        if verbose:
-                            print(f"\n[Thought Signature]: {final_signature[:100]}...")
+                # Extract thought signature if available
+                if hasattr(part, "thought_signature") and part.thought_signature:
+                    final_signature = part.thought_signature
+                    if verbose:
+                        print(f"\n[Thought Signature]: {final_signature[:100]}...")
 
-                elif part.text is not None:
-                    # Final text response
-                    print(f"\nModel response: {part.text}")
+            elif part.text is not None:
+                # Final text response
+                print(f"\nModel response: {part.text}")
 
-                    # Extract thought signature from text part if available
-                    if hasattr(part, "thought_signature") and part.thought_signature:
-                        final_signature = part.thought_signature
-                        if verbose:
-                            print(f"[Thought Signature]: {final_signature[:100]}...")
+                # Extract thought signature from text part if available
+                if hasattr(part, "thought_signature") and part.thought_signature:
+                    final_signature = part.thought_signature
+                    if verbose:
+                        print(f"[Thought Signature]: {final_signature[:100]}...")
 
         # Save final image
         if final_image_data is not None:
@@ -502,14 +501,13 @@ def generate_image(
                 if not str(output_path).startswith("output"):
                     if is_draft:
                         output_path = script_dir / "output/drafts" / output_path.name
+                    # Check if this looks like a final (contains "final" in name)
+                    elif "final" in output_path.stem.lower():
+                        output_path = (
+                            script_dir / "output/finals" / output_path.name
+                        )
                     else:
-                        # Check if this looks like a final (contains "final" in name)
-                        if "final" in output_path.stem.lower():
-                            output_path = (
-                                script_dir / "output/finals" / output_path.name
-                            )
-                        else:
-                            output_path = script_dir / "output" / output_path.name
+                        output_path = script_dir / "output" / output_path.name
 
             # Ensure output directory exists
             output_path.parent.mkdir(parents=True, exist_ok=True)
