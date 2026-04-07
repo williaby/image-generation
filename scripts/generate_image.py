@@ -503,9 +503,7 @@ def generate_image(
                         output_path = script_dir / "output/drafts" / output_path.name
                     # Check if this looks like a final (contains "final" in name)
                     elif "final" in output_path.stem.lower():
-                        output_path = (
-                            script_dir / "output/finals" / output_path.name
-                        )
+                        output_path = script_dir / "output/finals" / output_path.name
                     else:
                         output_path = script_dir / "output" / output_path.name
 

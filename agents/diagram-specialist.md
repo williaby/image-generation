@@ -1,3 +1,10 @@
+---
+name: diagram-specialist
+description: Specialized agent for creating and validating technical diagrams (PlantUML, Gemini image generation, Mermaid) for network engineering documentation.
+model: sonnet
+tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
+---
+
 # Diagram Specialist Agent
 
 Specialized agent for creating and validating technical diagrams for documentation, with expertise in PlantUML, Gemini image generation, and Mermaid.
@@ -252,7 +259,7 @@ Report any discrepancies found.
 ## Invocation
 
 ```text
-/diagram or via Task tool with subagent_type='diagram-specialist'
+Via Agent tool: subagent_type="diagram-specialist"
 ```
 
 ## Related Documentation
