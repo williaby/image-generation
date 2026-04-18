@@ -15,11 +15,8 @@ Coverage targets: every branch in the function body, including:
 - Extension mismatch with auto-correction
 """
 
-import io
-import sys
 from pathlib import Path
-from types import ModuleType
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -64,6 +61,7 @@ def _mock_response(
 # Convenience: patch the three network calls in the happy path
 # ---------------------------------------------------------------------------
 
+
 def _happy_path_mocks(
     submit_json: dict | None = None,
     status_json: dict | None = None,
@@ -93,6 +91,7 @@ def _happy_path_mocks(
 # Guard: requests not importable
 # ---------------------------------------------------------------------------
 
+
 class TestRequestsUnavailable:
     def test_returns_none_when_requests_not_available(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -118,6 +117,7 @@ class TestRequestsUnavailable:
 # Guard: API key not set
 # ---------------------------------------------------------------------------
 
+
 class TestNoApiKey:
     def test_returns_none_when_api_key_missing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -138,6 +138,7 @@ class TestNoApiKey:
 # ---------------------------------------------------------------------------
 # Guard: input path does not exist
 # ---------------------------------------------------------------------------
+
 
 class TestInputPathMissing:
     def test_returns_none_for_nonexistent_input(
@@ -162,6 +163,7 @@ class TestInputPathMissing:
 # Guard: unknown model name
 # ---------------------------------------------------------------------------
 
+
 class TestUnknownModel:
     def test_returns_none_for_unknown_model(
         self,
@@ -185,6 +187,7 @@ class TestUnknownModel:
 # Guard: invalid output_format
 # ---------------------------------------------------------------------------
 
+
 class TestInvalidOutputFormat:
     def test_returns_none_for_bmp_format(
         self,
@@ -207,6 +210,7 @@ class TestInvalidOutputFormat:
 # ---------------------------------------------------------------------------
 # Guard: face_enhancement_strength set but face_enhancement=False
 # ---------------------------------------------------------------------------
+
 
 class TestFaceStrengthWithoutFaceEnhance:
     def test_returns_none_when_strength_set_without_flag(
@@ -234,6 +238,7 @@ class TestFaceStrengthWithoutFaceEnhance:
 # ---------------------------------------------------------------------------
 # Guard: strength values outside 0.0-1.0
 # ---------------------------------------------------------------------------
+
 
 class TestStrengthOutOfRange:
     @pytest.mark.parametrize(
@@ -269,6 +274,7 @@ class TestStrengthOutOfRange:
 # ---------------------------------------------------------------------------
 # Happy path: submit -> poll once -> Completed -> download -> save
 # ---------------------------------------------------------------------------
+
 
 class TestHappyPath:
     @patch("scripts.generate_image.time.sleep")
@@ -326,6 +332,7 @@ class TestHappyPath:
 # 429 on poll -> retries with backoff and eventually completes
 # ---------------------------------------------------------------------------
 
+
 class TestPoll429Retry:
     @patch("scripts.generate_image.time.sleep")
     def test_429_retries_and_completes(
@@ -375,6 +382,7 @@ class TestPoll429Retry:
 # Polling timeout
 # ---------------------------------------------------------------------------
 
+
 class TestPollingTimeout:
     @patch("scripts.generate_image.time.sleep")
     def test_timeout_returns_none_with_message(
@@ -411,6 +419,7 @@ class TestPollingTimeout:
 # Terminal "Failed" status
 # ---------------------------------------------------------------------------
 
+
 class TestFailedStatus:
     @patch("scripts.generate_image.time.sleep")
     def test_failed_status_returns_none(
@@ -446,6 +455,7 @@ class TestFailedStatus:
 # Missing process_id in submit response
 # ---------------------------------------------------------------------------
 
+
 class TestMissingProcessId:
     @patch("scripts.generate_image.time.sleep")
     def test_missing_process_id_returns_none(
@@ -475,6 +485,7 @@ class TestMissingProcessId:
 # ---------------------------------------------------------------------------
 # Missing download URL
 # ---------------------------------------------------------------------------
+
 
 class TestMissingDownloadUrl:
     @patch("scripts.generate_image.time.sleep")
@@ -514,6 +525,7 @@ class TestMissingDownloadUrl:
 # SSRF: disallowed hostname
 # ---------------------------------------------------------------------------
 
+
 class TestSsrfDisallowedHostname:
     @patch("scripts.generate_image.time.sleep")
     def test_bad_hostname_returns_none(
@@ -544,12 +556,17 @@ class TestSsrfDisallowedHostname:
 
         assert result is None
         err = capsys.readouterr().err
-        assert "unexpected" in err.lower() or "ssrf" in err.lower() or "evil" in err.lower()
+        assert (
+            "unexpected" in err.lower()
+            or "ssrf" in err.lower()
+            or "evil" in err.lower()
+        )
 
 
 # ---------------------------------------------------------------------------
 # SSRF: http:// scheme
 # ---------------------------------------------------------------------------
+
 
 class TestSsrfHttpScheme:
     @patch("scripts.generate_image.time.sleep")
@@ -588,6 +605,7 @@ class TestSsrfHttpScheme:
 # allow_redirects=False is passed to image download
 # ---------------------------------------------------------------------------
 
+
 class TestAllowRedirectsFalse:
     @patch("scripts.generate_image.time.sleep")
     def test_image_download_disables_redirects(
@@ -618,6 +636,7 @@ class TestAllowRedirectsFalse:
 # ---------------------------------------------------------------------------
 # Empty image bytes
 # ---------------------------------------------------------------------------
+
 
 class TestEmptyImageBytes:
     @patch("scripts.generate_image.time.sleep")
@@ -650,6 +669,7 @@ class TestEmptyImageBytes:
 # Disk write fails (OSError)
 # ---------------------------------------------------------------------------
 
+
 class TestDiskWriteFailure:
     @patch("scripts.generate_image.time.sleep")
     def test_oserror_on_write_returns_none(
@@ -668,12 +688,15 @@ class TestDiskWriteFailure:
         with (
             patch("scripts.generate_image.requests.post", post_mock),
             patch("scripts.generate_image.requests.get", get_mock),
-            patch("builtins.open", side_effect=[
-                # First open() is reading the input file for the POST
-                open(inp, "rb"),
-                # Second open() is the write; make it fail
-                OSError("disk full"),
-            ]),
+            patch(
+                "builtins.open",
+                side_effect=[
+                    # First open() is reading the input file for the POST
+                    open(inp, "rb"),
+                    # Second open() is the write; make it fail
+                    OSError("disk full"),
+                ],
+            ),
         ):
             from scripts.generate_image import topaz_enhance_image
 
@@ -687,6 +710,7 @@ class TestDiskWriteFailure:
 # ---------------------------------------------------------------------------
 # Extension mismatch: user specifies .jpg but result is .png
 # ---------------------------------------------------------------------------
+
 
 class TestExtensionMismatch:
     @patch("scripts.generate_image.time.sleep")
