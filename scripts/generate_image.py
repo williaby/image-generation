@@ -58,6 +58,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 GENAI_AVAILABLE = True
 try:
@@ -104,7 +105,7 @@ IMAGE_SIZES = ["1K", "2K", "4K"]
 # Topaz Labs API base URL
 TOPAZ_BASE_URL = "https://api.topazlabs.com/image/v1"
 
-# Topaz model registry.  "enhance" → /enhance/async; "enhance-gen" → /enhance-gen/async
+# Topaz model registry: "enhance" -> /enhance/async; "enhance-gen" -> /enhance-gen/async
 # Generative models (Wonder, Bloom) cost ~6-12x more credits than precision models.
 TOPAZ_MODELS = {
     # Gigapixel precision upscaling (24 MP per credit)
@@ -118,11 +119,11 @@ TOPAZ_MODELS = {
     },
     "Low Resolution V2": {
         "endpoint": "enhance/async",
-        "description": "Optimised for very low-resolution sources",
+        "description": "Optimized for very low-resolution sources",
     },
     "CGI": {
         "endpoint": "enhance/async",
-        "description": "Optimised for CGI and rendered imagery",
+        "description": "Optimized for CGI and rendered imagery",
     },
     "Text Refine": {
         "endpoint": "enhance/async",
@@ -176,12 +177,17 @@ def _load_api_key(env_var: str) -> str | None:
     if not api_key:
         env_file = Path(__file__).parent.parent / ".env"
         if env_file.exists():
-            with open(env_file, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith(f"{env_var}="):
-                        api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        break
+            try:
+                with open(env_file, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith(f"{env_var}="):
+                            api_key = (
+                                line.split("=", 1)[1].strip().strip('"').strip("'")
+                            )
+                            break
+            except OSError:
+                pass
     return api_key or None
 
 
@@ -200,10 +206,10 @@ def get_topaz_api_key() -> str | None:
     """Get the Topaz Labs API key from environment or .env file."""
     api_key = _load_api_key("TOPAZ_API_KEY")
     if not api_key:
-        print("Error: TOPAZ_API_KEY not set.")
-        print("Set it with: export TOPAZ_API_KEY='your-api-key'")
-        print("Or add it to the .env file in the repository root.")
-        print("Get a key at: https://developer.topazlabs.com")
+        print("Error: TOPAZ_API_KEY not set.", file=sys.stderr)
+        print("Set it with: export TOPAZ_API_KEY='your-api-key'", file=sys.stderr)
+        print("Or add it to the .env file in the repository root.", file=sys.stderr)
+        print("Get a key at: https://developer.topazlabs.com", file=sys.stderr)
     return api_key
 
 
@@ -264,6 +270,16 @@ def topaz_enhance_image(
     ):
         return None
 
+    if face_enhancement_strength is not None and not face_enhancement:
+        print(
+            "Error: --topaz-face-strength requires --topaz-face-enhance to be set.",
+            file=sys.stderr,
+        )
+        return None
+
+    # #CRITICAL: API key sent as X-API-KEY header; never log headers containing this value.
+    # #ASSUME: Topaz API at TOPAZ_BASE_URL accepts multipart/form-data for all model endpoints.
+    _TOPAZ_DOWNLOAD_HOSTS = frozenset({"api.topazlabs.com", "cdn.topazlabs.com"})
     headers = {"X-API-KEY": api_key}
     endpoint_url = f"{TOPAZ_BASE_URL}/{model_config['endpoint']}"
 
@@ -291,14 +307,22 @@ def topaz_enhance_image(
                 timeout=30,
             )
         resp.raise_for_status()
-        process_id = resp.json()["process_id"]
-        if verbose:
-            print(f"  Job submitted: {process_id}")
     except Exception as e:
-        print(f"Error submitting Topaz job: {e}")
+        print(f"Error submitting Topaz job: {e}", file=sys.stderr)
         return None
 
-    # Poll for completion (exponential backoff, max ~2 minutes)
+    process_id = resp.json().get("process_id")
+    if not process_id:
+        print(
+            f"Error: Topaz API returned unexpected response (missing process_id): {resp.text[:200]}",
+            file=sys.stderr,
+        )
+        return None
+    if verbose:
+        print(f"  Job submitted: {process_id}")
+
+    # #ASSUME: job completes within 25 poll iterations; max wall time ~5 minutes.
+    # #EDGE: sustained 429 responses exhaust iterations and are reported as "did not complete".
     wait = 2.0
     for _ in range(25):
         time.sleep(wait)
@@ -318,14 +342,22 @@ def topaz_enhance_image(
             if status == "Completed":
                 break
             if status in ("Failed", "Error"):
-                print(f"Error: Topaz job failed (status: {status})")
+                print(
+                    f"Error: Topaz job {process_id} failed (status: {status})",
+                    file=sys.stderr,
+                )
                 return None
         except Exception as e:
-            print(f"Error polling Topaz status: {e}")
+            print(
+                f"Error polling Topaz status for job {process_id}: {e}", file=sys.stderr
+            )
             return None
         wait = min(wait * 1.5, 15)
     else:
-        print("Error: Topaz job timed out after polling limit.")
+        print(
+            f"Error: Topaz job {process_id} did not complete within the polling limit.",
+            file=sys.stderr,
+        )
         return None
 
     # Get download URL
@@ -336,18 +368,46 @@ def topaz_enhance_image(
             timeout=15,
         )
         dl_resp.raise_for_status()
-        download_url = dl_resp.json()["url"]
     except Exception as e:
-        print(f"Error getting Topaz download URL: {e}")
+        print(
+            f"Error getting Topaz download URL for job {process_id}: {e}",
+            file=sys.stderr,
+        )
+        return None
+
+    download_url = dl_resp.json().get("url")
+    if not download_url:
+        print(
+            f"Error: Topaz download response missing URL for job {process_id}",
+            file=sys.stderr,
+        )
+        return None
+
+    # #ASSUME: download_url is a valid HTTPS URL served from api.topazlabs.com or its CDN.
+    _parsed = urlparse(download_url)
+    if _parsed.scheme != "https" or _parsed.hostname not in _TOPAZ_DOWNLOAD_HOSTS:
+        print(
+            f"Error: Topaz returned unexpected download URL: {download_url!r}",
+            file=sys.stderr,
+        )
         return None
 
     # Download the enhanced image
     try:
-        img_resp = requests.get(download_url, timeout=120)
+        img_resp = requests.get(download_url, timeout=120, allow_redirects=False)
         img_resp.raise_for_status()
         image_data = img_resp.content
     except Exception as e:
-        print(f"Error downloading Topaz result: {e}")
+        print(
+            f"Error downloading Topaz result for job {process_id}: {e}", file=sys.stderr
+        )
+        return None
+
+    if not image_data:
+        print(
+            f"Error: Topaz download returned empty response for job {process_id}",
+            file=sys.stderr,
+        )
         return None
 
     # Resolve output path
@@ -357,12 +417,24 @@ def topaz_enhance_image(
     else:
         # Correct extension if needed
         detected_ext = detect_image_format(image_data)
-        if output_path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+        user_ext = output_path.suffix.lower()
+        if user_ext not in (".png", ".jpg", ".jpeg", ".webp"):
+            output_path = output_path.with_suffix(detected_ext)
+        elif user_ext != detected_ext:
+            print(
+                f"Warning: specified extension {user_ext!r} does not match Topaz result"
+                f" {detected_ext!r}; correcting.",
+                file=sys.stderr,
+            )
             output_path = output_path.with_suffix(detected_ext)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "wb") as f:
-        f.write(image_data)
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(image_data)
+    except OSError as e:
+        print(f"Error writing output file {output_path}: {e}", file=sys.stderr)
+        return None
 
     print(f"Topaz result saved to: {output_path}")
     return output_path
@@ -1071,7 +1143,7 @@ Examples:
         help="List available Topaz enhancement models and exit",
     )
 
-    # ── Topaz post-processing ────────────────────────────────────────────────
+    # --- Topaz post-processing ---
     topaz_group = parser.add_argument_group(
         "Topaz Labs post-processing (requires TOPAZ_API_KEY)"
     )
@@ -1100,14 +1172,14 @@ Examples:
         "--topaz-sharpen",
         type=float,
         metavar="STRENGTH",
-        help="Sharpening strength 0.0–1.0 applied during Topaz enhancement",
+        help="Sharpening strength 0.0-1.0 applied during Topaz enhancement",
     )
 
     topaz_group.add_argument(
         "--topaz-denoise",
         type=float,
         metavar="STRENGTH",
-        help="Denoising strength 0.0–1.0 applied during Topaz enhancement",
+        help="Denoising strength 0.0-1.0 applied during Topaz enhancement",
     )
 
     topaz_group.add_argument(
@@ -1120,7 +1192,7 @@ Examples:
         "--topaz-face-strength",
         type=float,
         metavar="STRENGTH",
-        help="Face enhancement strength 0.0–1.0 (used with --topaz-face-enhance)",
+        help="Face enhancement strength 0.0-1.0 (used with --topaz-face-enhance)",
     )
 
     args = parser.parse_args()
@@ -1137,7 +1209,7 @@ Examples:
         parser.print_help()
         sys.exit(1)
 
-    # ── Standalone Topaz enhancement mode ───────────────────────────────────
+    # --- Standalone Topaz enhancement mode ---
     if args.enhance:
         result = topaz_enhance_image(
             input_path=args.enhance,
@@ -1176,7 +1248,7 @@ Examples:
         else:
             output_path = args.finalize.parent / f"{args.finalize.stem}_final.png"
 
-        # ── Topaz finalization path ──────────────────────────────────────────
+        # --- Topaz finalization path ---
         if args.topaz:
             print(f"Finalizing draft image via Topaz: {args.finalize}")
             print(f"Topaz model: {args.topaz_model}")
@@ -1200,7 +1272,7 @@ Examples:
 
             sys.exit(0 if result else 1)
 
-        # ── Gemini finalization path (original behaviour) ────────────────────
+        # --- Gemini finalization path ---
         final_size = args.size if args.size else "2K"
         final_aspect = args.aspect if args.aspect else "16:9"
 
