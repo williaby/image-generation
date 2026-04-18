@@ -3,3 +3,6 @@
 
 # Google Gemini AI SDK for image generation
 google-genai>=0.4.0
+
+# HTTP client for Topaz Labs API (post-processing enhancement)
+requests>=2.32.0

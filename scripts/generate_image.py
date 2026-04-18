@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Generate images using Google Gemini's image generation models.
+Generate images using Google Gemini's image generation models, with optional
+Topaz Labs post-processing for professional-grade enhancement and upscaling.
 
 Supports:
 - Nano Banana (gemini-2.5-flash-preview-image-generation) - Fast generation
 - Nano Banana Pro (gemini-3-pro-image-preview) - 4K, better text rendering, Google Search grounding
+- Topaz Labs API - Post-generation enhancement: upscaling, denoising, sharpening, face enhancement
 
 Environment Variables:
     GEMINI_API_KEY: Required. Your Google AI API key.
+    TOPAZ_API_KEY:  Required for Topaz features. Get from developer.topazlabs.com.
 
 Usage:
     # Basic text-to-image generation
@@ -33,12 +36,26 @@ Usage:
 
     # List available models
     python generate_image.py --list-models
+
+    # Enhance an existing image with Topaz (standalone post-processing)
+    python generate_image.py --enhance photo.png
+    python generate_image.py --enhance photo.png --topaz-model "High Fidelity V2"
+    python generate_image.py --enhance photo.png --topaz-denoise 0.5 --topaz-sharpen 0.3
+    python generate_image.py --enhance photo.png --topaz-face-enhance -o portrait_enhanced.png
+
+    # Generate then immediately enhance with Topaz
+    python generate_image.py "A network diagram" --topaz
+    python generate_image.py "A network diagram" --topaz --topaz-model "Text Refine"
+
+    # Use Topaz to finalize a draft (instead of re-generating via Gemini)
+    python generate_image.py --finalize draft.png --topaz -o final.png
 """
 
 import argparse
 import base64
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -50,6 +67,13 @@ except ImportError:
     GENAI_AVAILABLE = False
     genai = None
     types = None
+
+REQUESTS_AVAILABLE = True
+try:
+    import requests
+except ImportError:
+    REQUESTS_AVAILABLE = False
+    requests = None
 
 
 # Model configurations
@@ -77,6 +101,32 @@ ASPECT_RATIOS = ["1:1", "3:4", "4:3", "9:16", "16:9"]
 # Valid image sizes for pro model
 IMAGE_SIZES = ["1K", "2K", "4K"]
 
+# Topaz Labs API base URL
+TOPAZ_BASE_URL = "https://api.topazlabs.com/image/v1"
+
+# Topaz model registry.  "enhance" → /enhance/async; "enhance-gen" → /enhance-gen/async
+# Generative models (Wonder, Bloom) cost ~6-12x more credits than precision models.
+TOPAZ_MODELS = {
+    # Gigapixel precision upscaling (24 MP per credit)
+    "Standard V2":         {"endpoint": "enhance/async",     "description": "Precision upscaling, best for most images"},
+    "High Fidelity V2":    {"endpoint": "enhance/async",     "description": "Highest quality, preserves fine detail"},
+    "Low Resolution V2":   {"endpoint": "enhance/async",     "description": "Optimised for very low-resolution sources"},
+    "CGI":                 {"endpoint": "enhance/async",     "description": "Optimised for CGI and rendered imagery"},
+    "Text Refine":         {"endpoint": "enhance/async",     "description": "Preserves and sharpens text in diagrams"},
+    "Detail Faces":        {"endpoint": "enhance/async",     "description": "Enhances facial clarity"},
+    "Recover Faces":       {"endpoint": "enhance/async",     "description": "Restores damaged or degraded faces"},
+    "Transparency Upscale":{"endpoint": "enhance/async",     "description": "Upscales images with alpha transparency"},
+    # Generative upscaling (4 MP per credit — more expensive)
+    "Wonder":              {"endpoint": "enhance-gen/async", "description": "Generative upscaling, adds intelligent detail"},
+    "Wonder 2":            {"endpoint": "enhance-gen/async", "description": "Improved generative upscaling"},
+    "Standard Max":        {"endpoint": "enhance-gen/async", "description": "Maximum quality generative upscaling"},
+    "Recover 3":           {"endpoint": "enhance-gen/async", "description": "Advanced recovery with generation"},
+    "Redefine":            {"endpoint": "enhance-gen/async", "description": "Creative reinterpretation with upscaling"},
+    "Bloom":               {"endpoint": "enhance-gen/async", "description": "Creative upscaling for AI-generated art"},
+}
+
+DEFAULT_TOPAZ_MODEL = "Standard V2"
+
 
 def get_api_key() -> str:
     """Get the Gemini API key from environment."""
@@ -99,6 +149,181 @@ def get_api_key() -> str:
         sys.exit(1)
 
     return api_key
+
+
+def get_topaz_api_key() -> str | None:
+    """Get the Topaz Labs API key from environment or .env file."""
+    api_key = os.environ.get("TOPAZ_API_KEY")
+    if not api_key:
+        env_file = Path(__file__).parent.parent / ".env"
+        if env_file.exists():
+            with open(env_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("TOPAZ_API_KEY="):
+                        api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+
+    if not api_key:
+        print("Error: TOPAZ_API_KEY not set.")
+        print("Set it with: export TOPAZ_API_KEY='your-api-key'")
+        print("Or add it to the .env file in the repository root.")
+        print("Get a key at: https://developer.topazlabs.com")
+    return api_key or None
+
+
+def topaz_enhance_image(
+    input_path: Path,
+    output_path: Path | None = None,
+    model: str = DEFAULT_TOPAZ_MODEL,
+    output_format: str = "png",
+    sharpen: float | None = None,
+    denoise: float | None = None,
+    face_enhancement: bool = False,
+    face_enhancement_strength: float | None = None,
+    verbose: bool = False,
+) -> Path | None:
+    """
+    Enhance an image using the Topaz Labs API (async job with polling).
+
+    Precision models (Gigapixel family): 24 MP per credit.
+    Generative models (Wonder, Bloom): 2-4 MP per credit — significantly more expensive.
+    """
+    if not REQUESTS_AVAILABLE:
+        print("Error: 'requests' package is required for Topaz enhancement.")
+        print("Install with: pip install requests")
+        return None
+
+    api_key = get_topaz_api_key()
+    if not api_key:
+        return None
+
+    if not input_path.exists():
+        print(f"Error: Input image not found: {input_path}")
+        return None
+
+    model_config = TOPAZ_MODELS.get(model)
+    if model_config is None:
+        print(f"Error: Unknown Topaz model '{model}'.")
+        print(f"Available: {', '.join(TOPAZ_MODELS)}")
+        return None
+
+    headers = {"X-API-KEY": api_key}
+    endpoint_url = f"{TOPAZ_BASE_URL}/{model_config['endpoint']}"
+
+    print(f"Topaz enhance: {input_path.name} [{model}]")
+
+    # Build form data
+    data: dict = {"model": model, "output_format": output_format}
+    if sharpen is not None:
+        data["sharpen"] = sharpen
+    if denoise is not None:
+        data["denoise"] = denoise
+    if face_enhancement:
+        data["face_enhancement"] = "true"
+        if face_enhancement_strength is not None:
+            data["face_enhancement_strength"] = face_enhancement_strength
+
+    # Submit async job
+    try:
+        with open(input_path, "rb") as f:
+            resp = requests.post(
+                endpoint_url,
+                headers=headers,
+                data=data,
+                files={"image": f},
+                timeout=30,
+            )
+        resp.raise_for_status()
+        process_id = resp.json()["process_id"]
+        if verbose:
+            print(f"  Job submitted: {process_id}")
+    except Exception as e:
+        print(f"Error submitting Topaz job: {e}")
+        return None
+
+    # Poll for completion (exponential backoff, max ~2 minutes)
+    wait = 2.0
+    for _ in range(25):
+        time.sleep(wait)
+        try:
+            status_resp = requests.get(
+                f"{TOPAZ_BASE_URL}/status/{process_id}",
+                headers=headers,
+                timeout=15,
+            )
+            if status_resp.status_code == 429:
+                wait = min(wait * 2, 30)
+                continue
+            status_resp.raise_for_status()
+            status = status_resp.json().get("status", "")
+            if verbose:
+                print(f"  Status: {status}")
+            if status == "Completed":
+                break
+            if status in ("Failed", "Error"):
+                print(f"Error: Topaz job failed (status: {status})")
+                return None
+        except Exception as e:
+            print(f"Error polling Topaz status: {e}")
+            return None
+        wait = min(wait * 1.5, 15)
+    else:
+        print("Error: Topaz job timed out after polling limit.")
+        return None
+
+    # Get download URL
+    try:
+        dl_resp = requests.get(
+            f"{TOPAZ_BASE_URL}/download/{process_id}",
+            headers=headers,
+            timeout=15,
+        )
+        dl_resp.raise_for_status()
+        download_url = dl_resp.json()["url"]
+    except Exception as e:
+        print(f"Error getting Topaz download URL: {e}")
+        return None
+
+    # Download the enhanced image
+    try:
+        img_resp = requests.get(download_url, timeout=120)
+        img_resp.raise_for_status()
+        image_data = img_resp.content
+    except Exception as e:
+        print(f"Error downloading Topaz result: {e}")
+        return None
+
+    # Resolve output path
+    if output_path is None:
+        detected_ext = detect_image_format(image_data)
+        output_path = input_path.parent / f"{input_path.stem}_topaz{detected_ext}"
+    else:
+        # Correct extension if needed
+        detected_ext = detect_image_format(image_data)
+        if output_path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+            output_path = output_path.with_suffix(detected_ext)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "wb") as f:
+        f.write(image_data)
+
+    print(f"Topaz result saved to: {output_path}")
+    return output_path
+
+
+def list_topaz_models() -> None:
+    """Print available Topaz enhancement models."""
+    print("Available Topaz models:\n")
+    print("  Precision upscaling (24 MP/credit):")
+    for name, cfg in TOPAZ_MODELS.items():
+        if cfg["endpoint"] == "enhance/async":
+            print(f"    {name:<22} — {cfg['description']}")
+    print("\n  Generative upscaling (2-4 MP/credit, more expensive):")
+    for name, cfg in TOPAZ_MODELS.items():
+        if cfg["endpoint"] == "enhance-gen/async":
+            print(f"    {name:<22} — {cfg['description']}")
+    print()
 
 
 def detect_image_format(data: bytes) -> str:
@@ -781,7 +1006,65 @@ Examples:
     parser.add_argument(
         "--list-models",
         action="store_true",
-        help="List available models and exit",
+        help="List available Gemini models and exit",
+    )
+
+    parser.add_argument(
+        "--list-topaz-models",
+        action="store_true",
+        help="List available Topaz enhancement models and exit",
+    )
+
+    # ── Topaz post-processing ────────────────────────────────────────────────
+    topaz_group = parser.add_argument_group(
+        "Topaz Labs post-processing (requires TOPAZ_API_KEY)"
+    )
+
+    topaz_group.add_argument(
+        "--enhance",
+        type=Path,
+        metavar="IMAGE",
+        help="Enhance an existing image with Topaz (standalone mode, no generation)",
+    )
+
+    topaz_group.add_argument(
+        "--topaz",
+        action="store_true",
+        help="Pipe generated (or finalized) image through Topaz after generation",
+    )
+
+    topaz_group.add_argument(
+        "--topaz-model",
+        default=DEFAULT_TOPAZ_MODEL,
+        metavar="MODEL",
+        help=f"Topaz model to use (default: {DEFAULT_TOPAZ_MODEL}). See --list-topaz-models.",
+    )
+
+    topaz_group.add_argument(
+        "--topaz-sharpen",
+        type=float,
+        metavar="STRENGTH",
+        help="Sharpening strength 0.0–1.0 applied during Topaz enhancement",
+    )
+
+    topaz_group.add_argument(
+        "--topaz-denoise",
+        type=float,
+        metavar="STRENGTH",
+        help="Denoising strength 0.0–1.0 applied during Topaz enhancement",
+    )
+
+    topaz_group.add_argument(
+        "--topaz-face-enhance",
+        action="store_true",
+        help="Enable Topaz face enhancement during post-processing",
+    )
+
+    topaz_group.add_argument(
+        "--topaz-face-strength",
+        type=float,
+        metavar="STRENGTH",
+        help="Face enhancement strength 0.0–1.0 (used with --topaz-face-enhance)",
     )
 
     args = parser.parse_args()
@@ -790,9 +1073,27 @@ Examples:
         list_models()
         return
 
-    if not args.prompt and not args.finalize:
+    if args.list_topaz_models:
+        list_topaz_models()
+        return
+
+    if not args.prompt and not args.finalize and not args.enhance:
         parser.print_help()
         sys.exit(1)
+
+    # ── Standalone Topaz enhancement mode ───────────────────────────────────
+    if args.enhance:
+        result = topaz_enhance_image(
+            input_path=args.enhance,
+            output_path=args.output,
+            model=args.topaz_model,
+            sharpen=args.topaz_sharpen,
+            denoise=args.topaz_denoise,
+            face_enhancement=args.topaz_face_enhance,
+            face_enhancement_strength=args.topaz_face_strength,
+            verbose=args.verbose,
+        )
+        sys.exit(0 if result else 1)
 
     # Check for google-genai package
     if not GENAI_AVAILABLE:
@@ -813,25 +1114,50 @@ Examples:
             print(f"Error: Draft image not found: {args.finalize}")
             sys.exit(1)
 
-        # Determine final resolution
+        # Determine output path
+        if args.output:
+            output_path = args.output
+        else:
+            output_path = args.finalize.parent / f"{args.finalize.stem}_final.png"
+
+        # ── Topaz finalization path ──────────────────────────────────────────
+        if args.topaz:
+            print(f"Finalizing draft image via Topaz: {args.finalize}")
+            print(f"Topaz model: {args.topaz_model}")
+            result = topaz_enhance_image(
+                input_path=args.finalize,
+                output_path=output_path,
+                model=args.topaz_model,
+                sharpen=args.topaz_sharpen,
+                denoise=args.topaz_denoise,
+                face_enhancement=args.topaz_face_enhance,
+                face_enhancement_strength=args.topaz_face_strength,
+                verbose=args.verbose,
+            )
+
+            if result:
+                print(f"\n{'=' * 60}")
+                print("Topaz finalization complete!")
+                print(f"Draft: {args.finalize}")
+                print(f"Final: {result}")
+                print(f"{'=' * 60}")
+
+            sys.exit(0 if result else 1)
+
+        # ── Gemini finalization path (original behaviour) ────────────────────
         final_size = args.size if args.size else "2K"
         final_aspect = args.aspect if args.aspect else "16:9"
 
         print(f"Finalizing draft image: {args.finalize}")
         print(f"Target resolution: {final_size} ({final_aspect})")
 
-        # Read the draft image's PROMPTS.md entry to get original prompt
         prompts_file = Path(__file__).parent.parent / "examples" / "PROMPTS.md"
-
         if prompts_file.exists():
             with open(prompts_file, encoding="utf-8") as f:
                 content = f.read()
-                # Try to find the entry for this image
                 image_name = args.finalize.stem
                 if image_name in content:
-                    # Extract prompt section (simplified - could be more robust)
                     print("Found original prompt in PROMPTS.md")
-                    # For now, require user to provide prompt or use reference-based upscaling
                     if not args.prompt:
                         print(
                             "\nNote: Use the same prompt as the draft, or provide a refinement prompt."
@@ -841,19 +1167,11 @@ Examples:
                         )
                         print("\nProceeding with reference-based upscaling...")
 
-        # Use reference-based generation at higher resolution
         prompt = (
             args.prompt
             if args.prompt
             else "Recreate this image at higher resolution with the same composition, style, and details"
         )
-
-        # Determine output path
-        if args.output:
-            output_path = args.output
-        else:
-            # Auto-generate output path: draft_v1.png -> draft_v1_final.png
-            output_path = args.finalize.parent / f"{args.finalize.stem}_final.png"
 
         result = generate_image(
             prompt=prompt,
@@ -882,7 +1200,6 @@ Examples:
             print("Error: Story must have at least 2 parts")
             sys.exit(1)
 
-        # Determine output prefix
         if args.output:
             output_prefix = args.output
         else:
@@ -898,11 +1215,27 @@ Examples:
             verbose=args.verbose,
         )
 
+        if args.topaz and results:
+            print(f"\nApplying Topaz enhancement to {len(results)} image(s)...")
+            enhanced = []
+            for path in results:
+                r = topaz_enhance_image(
+                    input_path=path,
+                    model=args.topaz_model,
+                    sharpen=args.topaz_sharpen,
+                    denoise=args.topaz_denoise,
+                    face_enhancement=args.topaz_face_enhance,
+                    face_enhancement_strength=args.topaz_face_strength,
+                    verbose=args.verbose,
+                )
+                if r:
+                    enhanced.append(r)
+            results = enhanced
+
         sys.exit(0 if len(results) == args.story_parts else 1)
 
     # Single image mode
     else:
-        # Override size to 1K if draft mode is enabled
         effective_size = "1K" if args.draft_mode else args.size
 
         if args.draft_mode:
@@ -924,10 +1257,22 @@ Examples:
             document_prompt=True,
         )
 
+        if result and args.topaz:
+            result = topaz_enhance_image(
+                input_path=result,
+                model=args.topaz_model,
+                sharpen=args.topaz_sharpen,
+                denoise=args.topaz_denoise,
+                face_enhancement=args.topaz_face_enhance,
+                face_enhancement_strength=args.topaz_face_strength,
+                verbose=args.verbose,
+            )
+
         if result and args.draft_mode:
             print(f"\n{'=' * 60}")
             print("Draft complete! To finalize at higher resolution:")
             print(f"  python scripts/generate_image.py --finalize {result} --size 2K")
+            print(f"  # Or with Topaz: --finalize {result} --topaz")
             print(f"{'=' * 60}")
 
         sys.exit(0 if result else 1)
