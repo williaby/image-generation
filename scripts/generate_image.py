@@ -108,68 +108,103 @@ TOPAZ_BASE_URL = "https://api.topazlabs.com/image/v1"
 # Generative models (Wonder, Bloom) cost ~6-12x more credits than precision models.
 TOPAZ_MODELS = {
     # Gigapixel precision upscaling (24 MP per credit)
-    "Standard V2":         {"endpoint": "enhance/async",     "description": "Precision upscaling, best for most images"},
-    "High Fidelity V2":    {"endpoint": "enhance/async",     "description": "Highest quality, preserves fine detail"},
-    "Low Resolution V2":   {"endpoint": "enhance/async",     "description": "Optimised for very low-resolution sources"},
-    "CGI":                 {"endpoint": "enhance/async",     "description": "Optimised for CGI and rendered imagery"},
-    "Text Refine":         {"endpoint": "enhance/async",     "description": "Preserves and sharpens text in diagrams"},
-    "Detail Faces":        {"endpoint": "enhance/async",     "description": "Enhances facial clarity"},
-    "Recover Faces":       {"endpoint": "enhance/async",     "description": "Restores damaged or degraded faces"},
-    "Transparency Upscale":{"endpoint": "enhance/async",     "description": "Upscales images with alpha transparency"},
-    # Generative upscaling (4 MP per credit — more expensive)
-    "Wonder":              {"endpoint": "enhance-gen/async", "description": "Generative upscaling, adds intelligent detail"},
-    "Wonder 2":            {"endpoint": "enhance-gen/async", "description": "Improved generative upscaling"},
-    "Standard Max":        {"endpoint": "enhance-gen/async", "description": "Maximum quality generative upscaling"},
-    "Recover 3":           {"endpoint": "enhance-gen/async", "description": "Advanced recovery with generation"},
-    "Redefine":            {"endpoint": "enhance-gen/async", "description": "Creative reinterpretation with upscaling"},
-    "Bloom":               {"endpoint": "enhance-gen/async", "description": "Creative upscaling for AI-generated art"},
+    "Standard V2": {
+        "endpoint": "enhance/async",
+        "description": "Precision upscaling, best for most images",
+    },
+    "High Fidelity V2": {
+        "endpoint": "enhance/async",
+        "description": "Highest quality, preserves fine detail",
+    },
+    "Low Resolution V2": {
+        "endpoint": "enhance/async",
+        "description": "Optimised for very low-resolution sources",
+    },
+    "CGI": {
+        "endpoint": "enhance/async",
+        "description": "Optimised for CGI and rendered imagery",
+    },
+    "Text Refine": {
+        "endpoint": "enhance/async",
+        "description": "Preserves and sharpens text in diagrams",
+    },
+    "Detail Faces": {
+        "endpoint": "enhance/async",
+        "description": "Enhances facial clarity",
+    },
+    "Recover Faces": {
+        "endpoint": "enhance/async",
+        "description": "Restores damaged or degraded faces",
+    },
+    "Transparency Upscale": {
+        "endpoint": "enhance/async",
+        "description": "Upscales images with alpha transparency",
+    },
+    # Generative upscaling (4 MP per credit; significantly more expensive)
+    "Wonder": {
+        "endpoint": "enhance-gen/async",
+        "description": "Generative upscaling, adds intelligent detail",
+    },
+    "Wonder 2": {
+        "endpoint": "enhance-gen/async",
+        "description": "Improved generative upscaling",
+    },
+    "Standard Max": {
+        "endpoint": "enhance-gen/async",
+        "description": "Maximum quality generative upscaling",
+    },
+    "Recover 3": {
+        "endpoint": "enhance-gen/async",
+        "description": "Advanced recovery with generation",
+    },
+    "Redefine": {
+        "endpoint": "enhance-gen/async",
+        "description": "Creative reinterpretation with upscaling",
+    },
+    "Bloom": {
+        "endpoint": "enhance-gen/async",
+        "description": "Creative upscaling for AI-generated art",
+    },
 }
 
 DEFAULT_TOPAZ_MODEL = "Standard V2"
 
 
-def get_api_key() -> str:
-    """Get the Gemini API key from environment."""
-    api_key = os.environ.get("GEMINI_API_KEY")
+def _load_api_key(env_var: str) -> str | None:
+    """Load an API key from the environment or the repo-root .env file."""
+    api_key = os.environ.get(env_var)
     if not api_key:
-        # Try loading from .env file in repo root
         env_file = Path(__file__).parent.parent / ".env"
         if env_file.exists():
             with open(env_file, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith("GEMINI_API_KEY="):
+                    if line.startswith(f"{env_var}="):
                         api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
                         break
+    return api_key or None
 
+
+def get_api_key() -> str:
+    """Get the Gemini API key from environment."""
+    api_key = _load_api_key("GEMINI_API_KEY")
     if not api_key:
         print("Error: GEMINI_API_KEY environment variable not set.")
         print("Set it with: export GEMINI_API_KEY='your-api-key'")
         print("Or create a .env file in the repository root.")
         sys.exit(1)
-
     return api_key
 
 
 def get_topaz_api_key() -> str | None:
     """Get the Topaz Labs API key from environment or .env file."""
-    api_key = os.environ.get("TOPAZ_API_KEY")
-    if not api_key:
-        env_file = Path(__file__).parent.parent / ".env"
-        if env_file.exists():
-            with open(env_file, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("TOPAZ_API_KEY="):
-                        api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        break
-
+    api_key = _load_api_key("TOPAZ_API_KEY")
     if not api_key:
         print("Error: TOPAZ_API_KEY not set.")
         print("Set it with: export TOPAZ_API_KEY='your-api-key'")
         print("Or add it to the .env file in the repository root.")
         print("Get a key at: https://developer.topazlabs.com")
-    return api_key or None
+    return api_key
 
 
 def topaz_enhance_image(
@@ -183,11 +218,10 @@ def topaz_enhance_image(
     face_enhancement_strength: float | None = None,
     verbose: bool = False,
 ) -> Path | None:
-    """
-    Enhance an image using the Topaz Labs API (async job with polling).
+    """Enhance an image using the Topaz Labs API (async job with polling).
 
     Precision models (Gigapixel family): 24 MP per credit.
-    Generative models (Wonder, Bloom): 2-4 MP per credit — significantly more expensive.
+    Generative models (Wonder, Bloom): 2-4 MP per credit, significantly more expensive.
     """
     if not REQUESTS_AVAILABLE:
         print("Error: 'requests' package is required for Topaz enhancement.")
@@ -208,12 +242,34 @@ def topaz_enhance_image(
         print(f"Available: {', '.join(TOPAZ_MODELS)}")
         return None
 
+    valid_formats = ("png", "jpg", "jpeg", "webp")
+    if output_format not in valid_formats:
+        print(
+            f"Error: output_format must be one of {valid_formats}, got '{output_format}'"
+        )
+        return None
+
+    def _check_strength(name: str, value: float | None) -> bool:
+        if value is not None and not (0.0 <= value <= 1.0):
+            print(f"Error: {name} must be between 0.0 and 1.0, got {value}")
+            return False
+        return True
+
+    if not all(
+        [
+            _check_strength("sharpen", sharpen),
+            _check_strength("denoise", denoise),
+            _check_strength("face_enhancement_strength", face_enhancement_strength),
+        ]
+    ):
+        return None
+
     headers = {"X-API-KEY": api_key}
     endpoint_url = f"{TOPAZ_BASE_URL}/{model_config['endpoint']}"
 
-    print(f"Topaz enhance: {input_path.name} [{model}]")
+    if verbose:
+        print(f"Topaz enhance: {input_path.name} [{model}]")
 
-    # Build form data
     data: dict = {"model": model, "output_format": output_format}
     if sharpen is not None:
         data["sharpen"] = sharpen
@@ -318,11 +374,11 @@ def list_topaz_models() -> None:
     print("  Precision upscaling (24 MP/credit):")
     for name, cfg in TOPAZ_MODELS.items():
         if cfg["endpoint"] == "enhance/async":
-            print(f"    {name:<22} — {cfg['description']}")
+            print(f"    {name:<22}  {cfg['description']}")
     print("\n  Generative upscaling (2-4 MP/credit, more expensive):")
     for name, cfg in TOPAZ_MODELS.items():
         if cfg["endpoint"] == "enhance-gen/async":
-            print(f"    {name:<22} — {cfg['description']}")
+            print(f"    {name:<22}  {cfg['description']}")
     print()
 
 
