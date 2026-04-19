@@ -158,30 +158,6 @@ class TestLoadApiKey:
         env_file = tmp_path / ".env"
         env_file.write_text('DOTENV_TEST_KEY="file-value-456"\n', encoding="utf-8")
 
-        # Patch __file__ so _load_api_key looks at our tmp .env
-        # _load_api_key uses: Path(__file__).parent.parent / ".env"
-        # We patch the module-level so the path resolution uses our file
-        with patch("scripts.generate_image.Path") as mock_path_cls:
-            fake_path = MagicMock()
-            fake_path.__truediv__ = MagicMock(return_value=env_file)
-            # Path(__file__) call chain: Path(__file__).parent.parent / ".env"
-            instance = MagicMock()
-            instance.parent.parent.__truediv__ = MagicMock(return_value=env_file)
-            mock_path_cls.return_value = instance
-
-            # Simpler: patch os.environ.get and open directly
-            pass  # fall through to real implementation below
-
-        # Use a more targeted approach: patch the env_file path resolution
-        # by calling the function with a controlled .env on disk
-        # We need to inject tmp_path into Path(__file__).parent.parent
-        with patch.object(
-            Path,
-            "__new__",
-            wraps=lambda cls, *a, **kw: Path.__new__(cls),
-        ):
-            pass  # not helpful; use direct patch instead
-
         # Direct approach: patch builtins.open and Path.exists
         real_open = open
 
@@ -579,7 +555,7 @@ def _make_fake_part(
     part.text = text
     part.thought = is_thought
     # thought_signature is absent by default (hasattr check in production code)
-    del part.thought_signature  # remove the MagicMock auto-attr
+    part.thought_signature = None
     return part
 
 
@@ -725,7 +701,7 @@ class TestGenerateImageEmptyCandidates:
         fake_response = MagicMock()
         fake_response.candidates = []
         # prompt_feedback absent to exercise the hasattr branch
-        del fake_response.prompt_feedback
+        fake_response.prompt_feedback = None
 
         mock_client_instance = MagicMock()
         mock_client_instance.models.generate_content.return_value = fake_response
@@ -1573,7 +1549,7 @@ class TestGenerateImageVerboseAndThoughts:
         thought_part.inline_data = None
         thought_part.text = "I am thinking about colors"
         thought_part.thought = True
-        del thought_part.thought_signature
+        thought_part.thought_signature = None
 
         # Final image part
         img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
@@ -1881,7 +1857,7 @@ class TestGenerateImageSaveThoughts:
         thought_part.thought = True
         thought_part.inline_data = thought_inline
         thought_part.text = None
-        del thought_part.thought_signature
+        thought_part.thought_signature = None
 
         # Final image part
         img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
@@ -1934,7 +1910,7 @@ class TestGenerateImageSaveThoughts:
         thought_part.thought = True
         thought_part.inline_data = thought_inline
         thought_part.text = None
-        del thought_part.thought_signature
+        thought_part.thought_signature = None
 
         img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
         img_part = _make_fake_part(inline_data=img_inline)
@@ -2111,7 +2087,7 @@ class TestGenerateImageThoughtCount:
         thought_part.thought = True
         thought_part.inline_data = None
         thought_part.text = None
-        del thought_part.thought_signature
+        thought_part.thought_signature = None
 
         img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
         img_part = _make_fake_part(inline_data=img_inline)
@@ -2485,7 +2461,7 @@ class TestGenerateImagePartLoopEdgeCases:
         blank_part.thought = False
         blank_part.inline_data = None
         blank_part.text = None
-        del blank_part.thought_signature
+        blank_part.thought_signature = None
 
         img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
         img_part = _make_fake_part(inline_data=img_inline)
