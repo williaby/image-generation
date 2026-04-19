@@ -23,7 +23,6 @@ repos:
         language: pygrep
         entry: "\u2014"
         files: \.(py|md|txt|toml|yaml|yml|json|rst)$
-        types_or: [python, markdown, plain-text]
       - id: basedpyright
         name: basedpyright
         language: system
