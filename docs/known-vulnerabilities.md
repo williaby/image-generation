@@ -16,6 +16,6 @@ None to date.
 
 ## Review schedule
 
-Next review due: 2026-06-18
+Next review due: 2026-06-17
 
 To re-audit: `uv run pip-audit`

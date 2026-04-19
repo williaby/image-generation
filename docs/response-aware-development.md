@@ -26,7 +26,7 @@ what to check before changing the code.
 
 ### `topaz_enhance_image()` -- annotated
 
-- Line 280: `#CRITICAL` -- API key present in Authorization header; do not log
+- Line 280: `#CRITICAL` -- API key present in X-API-KEY header; do not log
   request headers in debug mode.
 - Line 281: `#ASSUME` -- Topaz API accepts `multipart/form-data` with
   `data=` + `files=`. Verify: check Topaz changelog at
@@ -38,15 +38,19 @@ what to check before changing the code.
 - Line 386: `#ASSUME` -- download URL hostname is always in `_TOPAZ_DOWNLOAD_HOSTS`.
   Verify: check Topaz CDN policy if they announce infrastructure changes.
 
-### `generate_image()` -- not yet annotated (P1 gap)
+### `generate_image()` -- annotated
 
-See `scripts/generate_image.py` around lines 667 and 729. RAD markers to add:
-- `#CRITICAL` -- `api_key` is passed to `genai.Client()`; ensure it is never
-  logged.
-- `#ASSUME` -- `response.candidates[0].content.parts[0].inline_data.data` is
-  the path to the image bytes. Verify against google-genai SDK changelog.
-- `#EDGE` -- `candidates` list may be empty if Gemini refuses the prompt
-  (safety filter). Currently causes `IndexError`. Add guard.
+- Line 672: `#CRITICAL` -- `api_key` is passed directly to `genai.Client()`; never
+  log client objects or request headers in debug mode.
+- Line 737: `#ASSUME` -- `response.candidates[0].content.parts` is an iterable of
+  Part objects; `candidates[0].content` itself may be None. Verify against
+  google-genai SDK changelog before upgrading google-genai.
+- Line 740: `#EDGE` -- Empty candidates is guarded (returns None). Remaining risk:
+  `candidates[0].content is None` raises AttributeError on `.parts`; caught by
+  outer `except Exception` but produces a generic error message.
+- Line 742: `#VERIFY` -- Run `python -c "from google import genai; from
+  google.genai import types; help(types.GenerateContentResponse)"` after any
+  google-genai version bump to confirm response schema.
 
 ## Verification workflow
 

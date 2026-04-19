@@ -734,13 +734,17 @@ def generate_image(
 
     try:
         print("Generating image...")
-        # #ASSUME -- response.candidates[0].content.parts[0].inline_data.data
-        #            contains raw image bytes. Verify against google-genai SDK
-        #            changelog before upgrading google-genai.
-        # #EDGE   -- candidates list may be empty if Gemini applies a safety
-        #            filter; this currently raises IndexError uncaught.
-        # #VERIFY -- Run: python -c "import google.generativeai; help(...)" to
-        #            check response schema after any google-genai version bump.
+        # #ASSUME -- response.candidates[0].content.parts is an iterable of Part
+        #            objects; candidates[0].content itself may be None (model
+        #            refused). Verify against google-genai SDK changelog before
+        #            upgrading google-genai.
+        # #EDGE   -- Empty candidates list is guarded below (returns None). Remaining
+        #            risk: candidates[0].content is None raises AttributeError on
+        #            .parts; caught by the outer except Exception but produces a
+        #            generic error indistinguishable from network failures.
+        # #VERIFY -- Run: python -c "from google import genai; from google.genai
+        #            import types; help(types.GenerateContentResponse)" after any
+        #            google-genai version bump to confirm response schema.
         response = client.models.generate_content(
             model=model_id,
             contents=contents,
