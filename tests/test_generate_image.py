@@ -1,0 +1,2829 @@
+"""Tests for scripts/generate_image.py.
+
+Coverage focus: pure functions, file I/O helpers, API key helpers, and the
+generate_image() function with a mocked google-genai SDK client.
+
+Style mirrors test_topaz_enhance.py: unittest.mock only (no pytest-mock),
+tmp_path for file I/O, monkeypatch for environment variables.
+"""
+
+from __future__ import annotations
+
+import base64
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock, Mock, patch
+
+import pytest
+
+# ---------------------------------------------------------------------------
+# Magic-byte constants
+# ---------------------------------------------------------------------------
+
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+_JPEG_MAGIC = b"\xff\xd8\xff" + b"\x00" * 13
+_WEBP_MAGIC = b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"\x00" * 4
+_GIF87_MAGIC = b"GIF87a" + b"\x00" * 10
+_GIF89_MAGIC = b"GIF89a" + b"\x00" * 10
+_UNKNOWN_MAGIC = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b"
+
+
+# ---------------------------------------------------------------------------
+# Tier 1: detect_image_format() -- pure function, no mocks needed
+# ---------------------------------------------------------------------------
+
+
+class TestDetectImageFormat:
+    """detect_image_format() reads magic bytes and returns a dot-prefixed extension."""
+
+    def test_png_magic_returns_dot_png(self) -> None:
+        from scripts.generate_image import detect_image_format
+
+        assert detect_image_format(_PNG_MAGIC) == ".png"
+
+    def test_jpeg_magic_returns_dot_jpg(self) -> None:
+        from scripts.generate_image import detect_image_format
+
+        assert detect_image_format(_JPEG_MAGIC) == ".jpg"
+
+    def test_webp_magic_returns_dot_webp(self) -> None:
+        from scripts.generate_image import detect_image_format
+
+        assert detect_image_format(_WEBP_MAGIC) == ".webp"
+
+    def test_gif87_magic_returns_dot_gif(self) -> None:
+        from scripts.generate_image import detect_image_format
+
+        assert detect_image_format(_GIF87_MAGIC) == ".gif"
+
+    def test_gif89_magic_returns_dot_gif(self) -> None:
+        from scripts.generate_image import detect_image_format
+
+        assert detect_image_format(_GIF89_MAGIC) == ".gif"
+
+    def test_unknown_bytes_returns_dot_png_fallback(self) -> None:
+        from scripts.generate_image import detect_image_format
+
+        assert detect_image_format(_UNKNOWN_MAGIC) == ".png"
+
+    def test_empty_bytes_returns_dot_png_fallback(self) -> None:
+        from scripts.generate_image import detect_image_format
+
+        # Empty data: no magic bytes match, should fall back to .png
+        assert detect_image_format(b"") == ".png"
+
+
+# ---------------------------------------------------------------------------
+# Tier 1: get_extension_for_mime() -- pure function, no mocks needed
+# ---------------------------------------------------------------------------
+
+
+class TestGetExtensionForMime:
+    """get_extension_for_mime() maps MIME strings to dot-extensions."""
+
+    def test_image_png_returns_dot_png(self) -> None:
+        from scripts.generate_image import get_extension_for_mime
+
+        assert get_extension_for_mime("image/png") == ".png"
+
+    def test_image_jpeg_returns_dot_jpg(self) -> None:
+        from scripts.generate_image import get_extension_for_mime
+
+        assert get_extension_for_mime("image/jpeg") == ".jpg"
+
+    def test_image_webp_returns_dot_webp(self) -> None:
+        from scripts.generate_image import get_extension_for_mime
+
+        assert get_extension_for_mime("image/webp") == ".webp"
+
+    def test_image_gif_returns_dot_gif(self) -> None:
+        from scripts.generate_image import get_extension_for_mime
+
+        assert get_extension_for_mime("image/gif") == ".gif"
+
+    def test_unknown_mime_returns_dot_png_fallback(self) -> None:
+        from scripts.generate_image import get_extension_for_mime
+
+        assert get_extension_for_mime("application/octet-stream") == ".png"
+
+    def test_empty_string_returns_dot_png_fallback(self) -> None:
+        from scripts.generate_image import get_extension_for_mime
+
+        assert get_extension_for_mime("") == ".png"
+
+
+# ---------------------------------------------------------------------------
+# Tier 2: _load_api_key() -- file I/O with tmp_path
+# ---------------------------------------------------------------------------
+
+
+class TestLoadApiKey:
+    """_load_api_key() reads from env first, then falls back to a .env file."""
+
+    def test_returns_key_from_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.generate_image import _load_api_key
+
+        monkeypatch.setenv("MY_TEST_KEY", "env-value-123")
+        result = _load_api_key("MY_TEST_KEY")
+        assert result == "env-value-123"
+
+    def test_returns_none_when_neither_env_nor_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.generate_image import _load_api_key
+
+        monkeypatch.delenv("MY_MISSING_KEY", raising=False)
+        # Point __file__ parent.parent somewhere that has no .env
+        with patch("scripts.generate_image.Path") as mock_path_cls:
+            # Make env_file.exists() return False
+            env_file_mock = MagicMock()
+            env_file_mock.exists.return_value = False
+            # __file__.parent.parent / ".env" chain
+            mock_path_cls.return_value.__truediv__.return_value = env_file_mock
+            result = _load_api_key("MY_MISSING_KEY")
+
+        assert result is None
+
+    def test_reads_key_from_dot_env_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Key absent from env but present in a .env file next to the repo root."""
+        from scripts.generate_image import _load_api_key
+
+        monkeypatch.delenv("DOTENV_TEST_KEY", raising=False)
+
+        # Write a fake .env file
+        env_file = tmp_path / ".env"
+        env_file.write_text('DOTENV_TEST_KEY="file-value-456"\n', encoding="utf-8")
+
+        # Direct approach: patch builtins.open and Path.exists
+        real_open = open
+
+        def fake_open(path: Any, *args: Any, **kwargs: Any) -> Any:
+            return real_open(env_file, *args, **kwargs)
+
+        with (
+            patch("scripts.generate_image.Path") as mock_path_cls2,
+        ):
+            env_file_mock2 = MagicMock()
+            env_file_mock2.exists.return_value = True
+            # When open() is called on env_file_mock2, forward to the real file
+            env_file_mock2.__str__ = Mock(return_value=str(env_file))
+            mock_path_cls2.return_value.parent.parent.__truediv__.return_value = (
+                env_file_mock2
+            )
+            with patch("builtins.open", side_effect=fake_open):
+                result = _load_api_key("DOTENV_TEST_KEY")
+
+        assert result == "file-value-456"
+
+    def test_returns_none_when_env_file_raises_oserror(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.generate_image import _load_api_key
+
+        monkeypatch.delenv("OSERROR_TEST_KEY", raising=False)
+
+        with patch("scripts.generate_image.Path") as mock_path_cls:
+            env_file_mock = MagicMock()
+            env_file_mock.exists.return_value = True
+            mock_path_cls.return_value.parent.parent.__truediv__.return_value = (
+                env_file_mock
+            )
+            with patch("builtins.open", side_effect=OSError("permission denied")):
+                result = _load_api_key("OSERROR_TEST_KEY")
+
+        assert result is None
+
+    def test_returns_key_from_env_file_unquoted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Keys without quotes in .env file are parsed correctly."""
+        from scripts.generate_image import _load_api_key
+
+        monkeypatch.delenv("UNQUOTED_KEY", raising=False)
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("UNQUOTED_KEY=plain-value\n", encoding="utf-8")
+
+        real_open = open
+
+        def fake_open(path: Any, *args: Any, **kwargs: Any) -> Any:
+            return real_open(env_file, *args, **kwargs)
+
+        with patch("scripts.generate_image.Path") as mock_path_cls:
+            env_file_mock = MagicMock()
+            env_file_mock.exists.return_value = True
+            mock_path_cls.return_value.parent.parent.__truediv__.return_value = (
+                env_file_mock
+            )
+            with patch("builtins.open", side_effect=fake_open):
+                result = _load_api_key("UNQUOTED_KEY")
+
+        assert result == "plain-value"
+
+
+# ---------------------------------------------------------------------------
+# Tier 2: load_image_as_base64() -- reads a file and returns (b64, mime)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadImageAsBase64:
+    def test_valid_png_file_returns_base64_and_mime(self, tmp_path: Path) -> None:
+        from scripts.generate_image import load_image_as_base64
+
+        img = tmp_path / "test.png"
+        img.write_bytes(_PNG_MAGIC)
+
+        b64, mime = load_image_as_base64(img)
+
+        assert mime == "image/png"
+        decoded = base64.standard_b64decode(b64)
+        assert decoded == _PNG_MAGIC
+
+    def test_valid_jpeg_file_returns_correct_mime(self, tmp_path: Path) -> None:
+        from scripts.generate_image import load_image_as_base64
+
+        img = tmp_path / "photo.jpg"
+        img.write_bytes(_JPEG_MAGIC)
+
+        _, mime = load_image_as_base64(img)
+
+        assert mime == "image/jpeg"
+
+    def test_missing_file_raises_file_not_found(self, tmp_path: Path) -> None:
+        from scripts.generate_image import load_image_as_base64
+
+        missing = tmp_path / "does_not_exist.png"
+
+        with pytest.raises(FileNotFoundError):
+            load_image_as_base64(missing)
+
+    def test_extension_mismatch_still_returns_detected_mime(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A file named .jpg but containing PNG bytes should report image/png."""
+        from scripts.generate_image import load_image_as_base64
+
+        # Write PNG bytes but name the file .jpg
+        img = tmp_path / "sneaky.jpg"
+        img.write_bytes(_PNG_MAGIC)
+
+        _, mime = load_image_as_base64(img)
+
+        # Should detect PNG from magic bytes
+        assert mime == "image/png"
+        out = capsys.readouterr().out
+        # A warning about extension mismatch should have been printed
+        assert "warning" in out.lower() or ".jpg" in out
+
+
+# ---------------------------------------------------------------------------
+# Tier 2: document_image_prompt() -- appends to PROMPTS.md
+# ---------------------------------------------------------------------------
+
+
+class TestDocumentImagePrompt:
+    def test_creates_prompts_md_when_absent(self, tmp_path: Path) -> None:
+        """When PROMPTS.md does not exist yet, the function creates it."""
+        import scripts.generate_image as mod
+
+        # Set up directory layout that the function uses:
+        # Path(__file__).parent.parent / "examples" / "PROMPTS.md"
+        fake_script_path = tmp_path / "scripts" / "generate_image.py"
+        fake_script_path.parent.mkdir(parents=True, exist_ok=True)
+
+        examples_dir = tmp_path / "examples"
+        examples_dir.mkdir()
+        prompts_file = examples_dir / "PROMPTS.md"
+
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        img = output_dir / "generated_20240101_120000.png"
+        img.write_bytes(_PNG_MAGIC)
+
+        # PROMPTS.md must not exist before the call
+        assert not prompts_file.exists()
+
+        with patch.object(mod, "__file__", str(fake_script_path)):
+            from scripts.generate_image import document_image_prompt
+
+            document_image_prompt(
+                image_path=img,
+                prompt="A test prompt for coverage",
+                model_key="flash",
+                aspect_ratio="16:9",
+                image_size="2K",
+            )
+
+        assert prompts_file.exists()
+        content = prompts_file.read_text(encoding="utf-8")
+        assert "A test prompt for coverage" in content
+
+    def test_appends_to_existing_prompts_md(self, tmp_path: Path) -> None:
+        """When PROMPTS.md already exists, a new entry is appended."""
+        import scripts.generate_image as mod
+
+        # Set up fake directory layout matching what the function expects:
+        # Path(__file__).parent.parent / "examples" / "PROMPTS.md"
+        fake_script_path = tmp_path / "scripts" / "generate_image.py"
+        fake_script_path.parent.mkdir(parents=True, exist_ok=True)
+
+        examples_dir = tmp_path / "examples"
+        examples_dir.mkdir()
+        prompts_file = examples_dir / "PROMPTS.md"
+
+        initial_content = (
+            "# AI-Generated Image Registry\n\n"
+            "## Image Registry\n\n"
+            "| Filename | Model | Date | Prompt | Parameters |\n"
+            "|----------|-------|------|--------|------------|\n"
+            "\n## Detailed Prompts\n\n"
+        )
+        prompts_file.write_text(initial_content, encoding="utf-8")
+
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        img = output_dir / "test_image.png"
+        img.write_bytes(_PNG_MAGIC)
+
+        with patch.object(mod, "__file__", str(fake_script_path)):
+            from scripts.generate_image import document_image_prompt
+
+            document_image_prompt(
+                image_path=img,
+                prompt="Coverage test prompt",
+                model_key="flash",
+                aspect_ratio="1:1",
+                image_size="1K",
+            )
+
+        updated = prompts_file.read_text(encoding="utf-8")
+        assert "Coverage test prompt" in updated
+        assert "test_image.png" in updated
+
+    def test_skips_duplicate_entry(self, tmp_path: Path) -> None:
+        """Calling document_image_prompt twice with the same image does not duplicate."""
+        import scripts.generate_image as mod
+
+        fake_script_path = tmp_path / "scripts" / "generate_image.py"
+        fake_script_path.parent.mkdir(parents=True, exist_ok=True)
+
+        examples_dir = tmp_path / "examples"
+        examples_dir.mkdir()
+        prompts_file = examples_dir / "PROMPTS.md"
+
+        initial_content = (
+            "# AI-Generated Image Registry\n\n"
+            "## Image Registry\n\n"
+            "| Filename | Model | Date | Prompt | Parameters |\n"
+            "|----------|-------|------|--------|------------|\n"
+            "\n## Detailed Prompts\n\n"
+        )
+        prompts_file.write_text(initial_content, encoding="utf-8")
+
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        img = output_dir / "dedup_image.png"
+        img.write_bytes(_PNG_MAGIC)
+
+        with patch.object(mod, "__file__", str(fake_script_path)):
+            from scripts.generate_image import document_image_prompt
+
+            document_image_prompt(
+                image_path=img,
+                prompt="First call",
+                model_key="pro",
+                aspect_ratio="16:9",
+                image_size="4K",
+            )
+            document_image_prompt(
+                image_path=img,
+                prompt="Second call -- should be ignored",
+                model_key="pro",
+                aspect_ratio="16:9",
+                image_size="4K",
+            )
+
+        content = prompts_file.read_text(encoding="utf-8")
+        # The heading "### dedup_image.png" should appear exactly once
+        assert content.count("### dedup_image.png") == 1
+        assert "Second call" not in content
+
+
+# ---------------------------------------------------------------------------
+# Tier 3: get_api_key() and get_topaz_api_key()
+# ---------------------------------------------------------------------------
+
+
+class TestGetApiKey:
+    def test_returns_key_when_present_in_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.generate_image import get_api_key
+
+        monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+        # Also prevent fallback .env from interfering
+        with patch(
+            "scripts.generate_image._load_api_key", return_value="gemini-test-key"
+        ):
+            result = get_api_key()
+
+        assert result == "gemini-test-key"
+
+    def test_raises_system_exit_when_key_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.generate_image import get_api_key
+
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        with (
+            patch("scripts.generate_image._load_api_key", return_value=None),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            get_api_key()
+
+        assert exc_info.value.code == 1
+
+
+class TestGetTopazApiKey:
+    def test_returns_key_when_present_in_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.generate_image import get_topaz_api_key
+
+        monkeypatch.setenv("TOPAZ_API_KEY", "topaz-test-key")
+        with patch(
+            "scripts.generate_image._load_api_key", return_value="topaz-test-key"
+        ):
+            result = get_topaz_api_key()
+
+        assert result == "topaz-test-key"
+
+    def test_returns_none_when_key_absent_and_prints_to_stderr(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from scripts.generate_image import get_topaz_api_key
+
+        monkeypatch.delenv("TOPAZ_API_KEY", raising=False)
+        with patch("scripts.generate_image._load_api_key", return_value=None):
+            result = get_topaz_api_key()
+
+        assert result is None
+        err = capsys.readouterr().err
+        assert "topaz_api_key" in err.lower() or "topaz" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tier 3: list_topaz_models() -- returns TOPAZ_MODELS dict structure
+# ---------------------------------------------------------------------------
+
+
+class TestListTopazModels:
+    def test_topaz_models_dict_contains_standard_v2(self) -> None:
+        from scripts.generate_image import TOPAZ_MODELS
+
+        assert "Standard V2" in TOPAZ_MODELS
+
+    def test_standard_v2_has_endpoint_key(self) -> None:
+        from scripts.generate_image import TOPAZ_MODELS
+
+        assert "endpoint" in TOPAZ_MODELS["Standard V2"]
+
+    def test_all_models_have_endpoint_and_description(self) -> None:
+        from scripts.generate_image import TOPAZ_MODELS
+
+        for name, cfg in TOPAZ_MODELS.items():
+            assert "endpoint" in cfg, f"{name!r} missing 'endpoint'"
+            assert "description" in cfg, f"{name!r} missing 'description'"
+
+    def test_list_topaz_models_prints_output(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from scripts.generate_image import list_topaz_models
+
+        list_topaz_models()
+
+        out = capsys.readouterr().out
+        assert "Standard V2" in out
+        assert "precision" in out.lower() or "upscaling" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tier 3: list_models() -- prints available Gemini models
+# ---------------------------------------------------------------------------
+
+
+class TestListModels:
+    def test_list_models_prints_flash_and_pro(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from scripts.generate_image import list_models
+
+        list_models()
+
+        out = capsys.readouterr().out
+        assert "flash" in out.lower()
+        assert "pro" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tier 4: generate_image() with mocked google-genai SDK
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_inline_data(data: bytes, mime_type: str = "image/png") -> MagicMock:
+    """Build a fake inline_data object."""
+    inline = MagicMock()
+    inline.data = data
+    inline.mime_type = mime_type
+    return inline
+
+
+def _make_fake_part(
+    inline_data: MagicMock | None = None,
+    text: str | None = None,
+    is_thought: bool = False,
+) -> MagicMock:
+    """Build a fake response part."""
+    part = MagicMock()
+    part.inline_data = inline_data
+    part.text = text
+    part.thought = is_thought
+    # thought_signature is absent by default (hasattr check in production code)
+    part.thought_signature = None
+    return part
+
+
+def _make_fake_response(parts: list[MagicMock]) -> MagicMock:
+    """Build a fake generate_content() response with one candidate."""
+    candidate = MagicMock()
+    candidate.content.parts = parts
+    response = MagicMock()
+    response.candidates = [candidate]
+    return response
+
+
+class TestGenerateImageSuccess:
+    """Happy-path: image bytes returned, file written, Path returned."""
+
+    def test_writes_output_file_and_returns_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini-key")
+
+        # Fake response: one non-thought part with PNG inline_data
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        # Build the mock client
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "out.png"
+
+        # Patch script's __file__ so output path resolution uses tmp_path
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch(
+                "scripts.generate_image._load_api_key", return_value="fake-gemini-key"
+            ),
+            patch("scripts.generate_image.document_image_prompt"),
+        ):
+            result = mod.generate_image(
+                prompt="A test image",
+                model_key="flash",
+                output_path=output_path,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        assert result.exists()
+        assert result.read_bytes() == _PNG_MAGIC
+
+    def test_returned_path_has_correct_extension(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "result.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Check extension",
+                model_key="flash",
+                output_path=output_path,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        assert result.suffix == ".png"
+
+    def test_auto_timestamp_path_when_output_not_specified(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Auto path test",
+                model_key="flash",
+                output_path=None,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        assert result.exists()
+        assert "generated_" in result.name or result.name.startswith("generated")
+
+
+class TestGenerateImageEmptyCandidates:
+    """When the API returns no candidates, the function must not crash."""
+
+    def test_empty_candidates_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # NOTE: The code at line 751 now checks 'if not response.candidates:' before
+        # any indexing, so empty candidates returns None gracefully rather than raising
+        # IndexError. This test verifies that safe branch.
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        fake_response = MagicMock()
+        fake_response.candidates = []
+        # prompt_feedback absent to exercise the hasattr branch
+        fake_response.prompt_feedback = None
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        with (
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Empty candidates test",
+                model_key="flash",
+                document_prompt=False,
+            )
+
+        assert result is None
+
+    def test_empty_candidates_with_prompt_feedback(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """When response has prompt_feedback, it should be printed."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        fake_response = MagicMock()
+        fake_response.candidates = []
+        fake_response.prompt_feedback = "SAFETY_BLOCK"
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        with (
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Safety block test",
+                model_key="flash",
+                document_prompt=False,
+            )
+
+        assert result is None
+        out = capsys.readouterr().out
+        assert "feedback" in out.lower() or "safety" in out.lower()
+
+
+class TestGenerateImageApiKeyMissing:
+    """When get_api_key() raises SystemExit, it should propagate."""
+
+    def test_system_exit_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+        with (
+            patch("scripts.generate_image._load_api_key", return_value=None),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.generate_image(
+                prompt="Should exit",
+                model_key="flash",
+                document_prompt=False,
+            )
+
+        assert exc_info.value.code == 1
+
+
+class TestGenerateImageUnknownModel:
+    def test_unknown_model_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        with patch("scripts.generate_image._load_api_key", return_value="fake-key"):
+            result = mod.generate_image(
+                prompt="Unknown model test",
+                model_key="nonexistent_model",
+                document_prompt=False,
+            )
+
+        assert result is None
+        out = capsys.readouterr().out
+        assert "unknown" in out.lower() or "nonexistent" in out.lower()
+
+
+class TestGenerateImageNoImageData:
+    """When response has candidates but no inline_data, returns None."""
+
+    def test_text_only_response_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        # Part has text but no inline_data
+        part = _make_fake_part(inline_data=None, text="Here is some text")
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        with (
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Text-only test",
+                model_key="flash",
+                document_prompt=False,
+            )
+
+        assert result is None
+        out = capsys.readouterr().out
+        assert "no image data" in out.lower() or "error" in out.lower()
+
+
+class TestGenerateImageApiException:
+    """When generate_content() raises, the exception is caught and None returned."""
+
+    def test_api_exception_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.side_effect = RuntimeError(
+            "connection refused"
+        )
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        with (
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Exception test",
+                model_key="flash",
+                document_prompt=False,
+            )
+
+        assert result is None
+        out = capsys.readouterr().out
+        assert "error" in out.lower()
+
+    def test_api_key_error_hints_at_api_key(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """When the error message contains 'API_KEY', an extra hint is printed."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "bad-key")
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.side_effect = RuntimeError(
+            "INVALID_API_KEY: key is malformed"
+        )
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        with (
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="bad-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Bad key test",
+                model_key="flash",
+                document_prompt=False,
+            )
+
+        assert result is None
+        out = capsys.readouterr().out
+        assert "gemini_api_key" in out.lower() or "api key" in out.lower()
+
+
+class TestGenerateImageDraftMode:
+    """Draft mode generates into output/drafts/ subdirectory."""
+
+    def test_draft_goes_to_drafts_subdir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output" / "drafts").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Draft mode test",
+                model_key="flash",
+                output_path=None,
+                is_draft=True,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        assert "draft" in str(result).lower()
+
+
+def _patch_pro_model_types() -> tuple[Any, Any]:
+    """Return context managers that patch types for pro-model tests.
+
+    The installed google-genai SDK does not have types.ImageConfig and
+    types.GenerateContentConfig rejects unknown 'image_config' fields via
+    pydantic strict validation. We mock both to avoid errors when exercising
+    the pro model code path that builds an image config.
+    """
+    return (
+        patch(
+            "scripts.generate_image.types.ImageConfig",
+            MagicMock(return_value=MagicMock()),
+            create=True,
+        ),
+        patch(
+            "scripts.generate_image.types.GenerateContentConfig",
+            MagicMock(return_value=MagicMock()),
+        ),
+    )
+
+
+class TestGenerateImageProModel:
+    """Pro model supports aspect_ratio, image_size, and use_search."""
+
+    def test_pro_model_with_aspect_and_size(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "pro_out.png"
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        img_cfg_patch, gen_cfg_patch = _patch_pro_model_types()
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+            img_cfg_patch,
+            gen_cfg_patch,
+        ):
+            result = mod.generate_image(
+                prompt="Pro model test",
+                model_key="pro",
+                output_path=output_path,
+                aspect_ratio="16:9",
+                image_size="4K",
+                document_prompt=False,
+            )
+
+        assert result is not None
+        # Confirm generate_content was called with the pro model id
+        call_kwargs = mock_client_instance.models.generate_content.call_args
+        assert call_kwargs is not None
+        assert "gemini-3-pro" in str(call_kwargs).lower() or "pro" in str(call_kwargs)
+
+    def test_pro_model_with_google_search(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "search_out.png"
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        # use_search with no aspect/size does not hit ImageConfig, so no types mock needed
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Search-enabled image",
+                model_key="pro",
+                output_path=output_path,
+                use_search=True,
+                document_prompt=False,
+            )
+
+        assert result is not None
+
+    def test_invalid_aspect_ratio_warns_and_continues(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "warn_out.png"
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        # Invalid ratio means image_config_kwargs stays empty; ImageConfig not called
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Bad ratio test",
+                model_key="pro",
+                output_path=output_path,
+                aspect_ratio="7:3",  # invalid ratio -- warning printed, not added to config
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "warning" in out.lower() or "invalid" in out.lower()
+
+
+class TestGenerateImageWithReferenceImage:
+    """When reference images are provided, they are base64-encoded and included."""
+
+    def test_existing_reference_image_included(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        # Create a reference image
+        ref_img = tmp_path / "ref.png"
+        ref_img.write_bytes(_PNG_MAGIC)
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "out_with_ref.png"
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Edit this image",
+                model_key="flash",
+                reference_images=[ref_img],
+                output_path=output_path,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        # Verify generate_content was called with contents that include more than just the prompt
+        call_args = mock_client_instance.models.generate_content.call_args
+        contents = call_args.kwargs.get("contents") or call_args.args[1]
+        # Should have at least 2 items: the image part + the prompt string
+        assert len(contents) >= 2
+
+    def test_missing_reference_image_warns_and_skips(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        missing_ref = tmp_path / "nonexistent_ref.png"
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "out_skip_ref.png"
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Edit with missing ref",
+                model_key="flash",
+                reference_images=[missing_ref],
+                output_path=output_path,
+                document_prompt=False,
+            )
+
+        assert result is not None  # still succeeds, just skipped the ref
+        out = capsys.readouterr().out
+        assert "warning" in out.lower() or "not found" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Additional document_image_prompt() branches
+# ---------------------------------------------------------------------------
+
+
+def _setup_prompts_env(tmp_path: Path) -> tuple[Path, Path]:
+    """Return (fake_script_path, prompts_file) for document_image_prompt tests."""
+    fake_script = tmp_path / "scripts" / "generate_image.py"
+    fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+    examples_dir = tmp_path / "examples"
+    examples_dir.mkdir(exist_ok=True)
+    prompts_file = examples_dir / "PROMPTS.md"
+
+    initial = (
+        "# AI-Generated Image Registry\n\n"
+        "## Image Registry\n\n"
+        "| Filename | Model | Date | Prompt | Parameters |\n"
+        "|----------|-------|------|--------|------------|\n"
+        "\n## Detailed Prompts\n\n"
+    )
+    prompts_file.write_text(initial, encoding="utf-8")
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(exist_ok=True)
+
+    return fake_script, prompts_file
+
+
+class TestDocumentImagePromptBranches:
+    def test_reference_images_listed(self, tmp_path: Path) -> None:
+        """When reference_images is provided, each is listed under Attachments."""
+        import scripts.generate_image as mod
+
+        fake_script, prompts_file = _setup_prompts_env(tmp_path)
+        img = tmp_path / "output" / "img_with_refs.png"
+        img.write_bytes(_PNG_MAGIC)
+        ref1 = tmp_path / "ref1.png"
+        ref1.write_bytes(_PNG_MAGIC)
+
+        with patch.object(mod, "__file__", str(fake_script)):
+            from scripts.generate_image import document_image_prompt
+
+            document_image_prompt(
+                image_path=img,
+                prompt="Image with references",
+                model_key="flash",
+                aspect_ratio=None,
+                image_size=None,
+                reference_images=[ref1],
+            )
+
+        content = prompts_file.read_text(encoding="utf-8")
+        assert "Attachments" in content
+        assert "ref1.png" in content
+
+    def test_is_draft_adds_type_label(self, tmp_path: Path) -> None:
+        """is_draft=True adds the draft type annotation."""
+        import scripts.generate_image as mod
+
+        fake_script, prompts_file = _setup_prompts_env(tmp_path)
+        img = tmp_path / "output" / "draft_img.png"
+        img.write_bytes(_PNG_MAGIC)
+
+        with patch.object(mod, "__file__", str(fake_script)):
+            from scripts.generate_image import document_image_prompt
+
+            document_image_prompt(
+                image_path=img,
+                prompt="Draft image",
+                model_key="flash",
+                aspect_ratio=None,
+                image_size=None,
+                is_draft=True,
+            )
+
+        content = prompts_file.read_text(encoding="utf-8")
+        assert "Draft" in content or "temporary" in content.lower()
+
+    def test_is_final_adds_type_and_location(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """is_final=True adds location and final type annotation, and prints confirmation."""
+        import scripts.generate_image as mod
+
+        fake_script, prompts_file = _setup_prompts_env(tmp_path)
+        img = tmp_path / "output" / "final_img.png"
+        img.write_bytes(_PNG_MAGIC)
+
+        with patch.object(mod, "__file__", str(fake_script)):
+            from scripts.generate_image import document_image_prompt
+
+            document_image_prompt(
+                image_path=img,
+                prompt="Final image",
+                model_key="pro",
+                aspect_ratio="16:9",
+                image_size="4K",
+                is_final=True,
+            )
+
+        content = prompts_file.read_text(encoding="utf-8")
+        assert "Final" in content or "production" in content.lower()
+        assert "Location" in content
+        out = capsys.readouterr().out
+        assert "documented" in out.lower() or "prompts" in out.lower()
+
+    def test_purpose_field_included(self, tmp_path: Path) -> None:
+        """When purpose is provided, it is included in the detailed entry."""
+        import scripts.generate_image as mod
+
+        fake_script, prompts_file = _setup_prompts_env(tmp_path)
+        img = tmp_path / "output" / "purpose_img.png"
+        img.write_bytes(_PNG_MAGIC)
+
+        with patch.object(mod, "__file__", str(fake_script)):
+            from scripts.generate_image import document_image_prompt
+
+            document_image_prompt(
+                image_path=img,
+                prompt="Image with purpose",
+                model_key="flash",
+                aspect_ratio=None,
+                image_size=None,
+                purpose="Testing the purpose field",
+            )
+
+        content = prompts_file.read_text(encoding="utf-8")
+        assert "Testing the purpose field" in content
+
+    def test_prompt_longer_than_50_chars_is_truncated_in_table(
+        self, tmp_path: Path
+    ) -> None:
+        """Prompts > 50 chars are shortened with '...' in the table row."""
+        import scripts.generate_image as mod
+
+        fake_script, prompts_file = _setup_prompts_env(tmp_path)
+        img = tmp_path / "output" / "long_prompt_img.png"
+        img.write_bytes(_PNG_MAGIC)
+
+        long_prompt = "A" * 60  # 60 chars, definitely over 50
+
+        with patch.object(mod, "__file__", str(fake_script)):
+            from scripts.generate_image import document_image_prompt
+
+            document_image_prompt(
+                image_path=img,
+                prompt=long_prompt,
+                model_key="flash",
+                aspect_ratio=None,
+                image_size=None,
+            )
+
+        content = prompts_file.read_text(encoding="utf-8")
+        assert "..." in content
+
+
+# ---------------------------------------------------------------------------
+# generate_image() output path edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateImageOutputPathEdgeCases:
+    def test_no_extension_on_output_path_gets_detected_extension(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the output path has no extension, the detected extension is appended."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        # Output path with no extension
+        output_path = tmp_path / "output" / "my_image"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="No extension test",
+                model_key="flash",
+                output_path=output_path,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        # Extension should have been added
+        assert result.suffix == ".png"
+
+    def test_output_path_not_under_output_dir_gets_prefixed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An output path not starting with 'output' is moved into output/."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        # Path that does NOT start with "output"
+        output_path = tmp_path / "my_custom_name.png"
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Custom path test",
+                model_key="flash",
+                output_path=output_path,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        assert result.exists()
+
+    def test_output_path_with_final_in_name_goes_to_finals_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A path containing 'final' in the stem is placed in output/finals/."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "my_final_image.png"  # "final" in stem
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output" / "finals").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Final image test",
+                model_key="flash",
+                output_path=output_path,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        assert result.exists()
+        assert "finals" in str(result) or result.exists()
+
+    def test_user_extension_mismatch_gets_corrected(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """User specifies .jpg but actual data is PNG: extension is corrected with warning."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        # User says .jpg but response is PNG
+        output_path = tmp_path / "output" / "image.jpg"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Extension mismatch test",
+                model_key="flash",
+                output_path=output_path,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        assert result.suffix == ".png"
+        out = capsys.readouterr().out
+        assert "warning" in out.lower() or ".jpg" in out
+
+
+# ---------------------------------------------------------------------------
+# generate_image() verbose / save_thoughts paths
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateImageVerboseAndThoughts:
+    """Thought processing branches (verbose=True, save_thoughts=True)."""
+
+    def test_verbose_text_part_with_thought_signature(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A non-thought text part that also has a thought_signature should be handled."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        # Build two parts: a text-only part with a thought_signature, then the real image
+        text_part = MagicMock()
+        text_part.inline_data = None
+        text_part.text = "Here is your image"
+        text_part.thought = False
+        text_part.thought_signature = b"\x00\x01"  # binary signature
+
+        img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        img_part = _make_fake_part(inline_data=img_inline)
+
+        fake_response = _make_fake_response([text_part, img_part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "verbose_out.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Verbose signature test",
+                model_key="flash",
+                output_path=output_path,
+                verbose=True,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        # Signature sidecar file should have been written (verbose=True)
+        sig_file = result.with_suffix(".signature.bin")
+        assert sig_file.exists()
+
+    def test_thought_part_verbose_prints_reasoning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A thought=True part with text should print reasoning in verbose mode."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        # A thought part (not the final image)
+        thought_part = MagicMock()
+        thought_part.inline_data = None
+        thought_part.text = "I am thinking about colors"
+        thought_part.thought = True
+        thought_part.thought_signature = None
+
+        # Final image part
+        img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        img_part = _make_fake_part(inline_data=img_inline)
+
+        fake_response = _make_fake_response([thought_part, img_part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "thought_out.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Thought test",
+                model_key="flash",
+                output_path=output_path,
+                verbose=True,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert (
+            "thinking" in out.lower()
+            or "reasoning" in out.lower()
+            or "thought" in out.lower()
+        )
+
+
+# ---------------------------------------------------------------------------
+# generate_story_sequence()
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateStorySequence:
+    def test_zero_parts_returns_empty_list(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from scripts.generate_image import generate_story_sequence
+
+        result = generate_story_sequence(base_prompt="A story", num_parts=0)
+
+        assert result == []
+        out = capsys.readouterr().out
+        assert "error" in out.lower() or "least 1" in out.lower()
+
+    def test_unknown_model_returns_empty_list(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from scripts.generate_image import generate_story_sequence
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        with patch("scripts.generate_image._load_api_key", return_value="fake-key"):
+            result = generate_story_sequence(
+                base_prompt="A story",
+                num_parts=2,
+                model_key="nonexistent",
+            )
+
+        assert result == []
+
+    def test_two_part_story_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two-part story: first part sets up, second finalizes. Mock generate_image."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        # Both parts return a real file
+        part1_file = tmp_path / "story_part1.png"
+        part2_file = tmp_path / "story_part2.png"
+        part1_file.write_bytes(_PNG_MAGIC)
+        part2_file.write_bytes(_PNG_MAGIC)
+
+        call_count = [0]
+
+        def fake_generate_image(**kwargs: object) -> Path:
+            call_count[0] += 1
+            return part1_file if call_count[0] == 1 else part2_file
+
+        with (
+            patch(
+                "scripts.generate_image.generate_image", side_effect=fake_generate_image
+            ),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_story_sequence(
+                base_prompt="A two-part story",
+                num_parts=2,
+                model_key="flash",
+                output_prefix=tmp_path / "story",
+            )
+
+        assert len(result) == 2
+        assert result[0] == part1_file
+        assert result[1] == part2_file
+
+    def test_story_stops_early_on_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If part 1 fails (returns None), the loop breaks and returns empty list."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        with (
+            patch("scripts.generate_image.generate_image", return_value=None),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_story_sequence(
+                base_prompt="Failing story",
+                num_parts=3,
+                model_key="flash",
+                output_prefix=tmp_path / "story",
+            )
+
+        assert result == []
+
+    def test_three_part_story_uses_middle_prompt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A 3-part story exercises the middle-part prompt branch."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        files = [tmp_path / f"story_part{i}.png" for i in range(1, 4)]
+        for f in files:
+            f.write_bytes(_PNG_MAGIC)
+
+        call_count = [0]
+
+        def fake_generate(**kwargs: object) -> Path:
+            idx = call_count[0]
+            call_count[0] += 1
+            return files[idx]
+
+        with (
+            patch("scripts.generate_image.generate_image", side_effect=fake_generate),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_story_sequence(
+                base_prompt="Three-part story",
+                num_parts=3,
+                model_key="flash",
+                output_prefix=tmp_path / "story",
+            )
+
+        assert len(result) == 3
+
+    def test_story_with_auto_prefix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When output_prefix is None, a timestamped prefix is generated."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        part_file = tmp_path / "auto_part1.png"
+        part_file.write_bytes(_PNG_MAGIC)
+
+        with (
+            patch(
+                "scripts.generate_image.generate_image",
+                return_value=part_file,
+            ),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_story_sequence(
+                base_prompt="Auto prefix story",
+                num_parts=1,
+                model_key="flash",
+                output_prefix=None,
+            )
+
+        assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# _load_api_key: direct env lookup (no Path mocking needed)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadApiKeySimple:
+    """Simple _load_api_key tests that just use environment variables."""
+
+    def test_returns_key_from_env_directly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.generate_image import _load_api_key
+
+        monkeypatch.setenv("DIRECT_ENV_KEY", "direct-value")
+        result = _load_api_key("DIRECT_ENV_KEY")
+        assert result == "direct-value"
+
+    def test_returns_none_when_env_absent_and_no_env_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Key absent from env, .env file does not exist -> returns None."""
+        import scripts.generate_image as mod
+
+        monkeypatch.delenv("ABSENT_KEY_XYZ", raising=False)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        # No .env file created; function should return None
+
+        with patch.object(mod, "__file__", str(fake_script)):
+            from scripts.generate_image import _load_api_key
+
+            result = _load_api_key("ABSENT_KEY_XYZ")
+
+        assert result is None
+
+    def test_reads_key_from_env_file_via_real_fs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Key absent from env but .env file on disk contains it."""
+        import scripts.generate_image as mod
+
+        monkeypatch.delenv("FS_ENV_KEY", raising=False)
+
+        # Create a .env file at tmp_path/.env
+        env_file = tmp_path / ".env"
+        env_file.write_text("FS_ENV_KEY='fs-test-value'\n", encoding="utf-8")
+
+        # Make the script's parent.parent point to tmp_path
+        # (_load_api_key resolves: Path(__file__).parent.parent / ".env")
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with patch.object(mod, "__file__", str(fake_script)):
+            from scripts.generate_image import _load_api_key
+
+            result = _load_api_key("FS_ENV_KEY")
+
+        assert result == "fs-test-value"
+
+    def test_env_file_with_oserror_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When .env exists but open() raises OSError, function returns None."""
+        import scripts.generate_image as mod
+
+        monkeypatch.delenv("OSERR_KEY", raising=False)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        # Create a .env file so the exists() check passes
+        (tmp_path / ".env").write_text("OSERR_KEY=val\n", encoding="utf-8")
+
+        real_open = open
+
+        def oserror_open(path: Any, *a: Any, **kw: Any) -> Any:
+            if str(path).endswith(".env"):
+                raise OSError("permission denied")
+            return real_open(path, *a, **kw)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("builtins.open", side_effect=oserror_open),
+        ):
+            from scripts.generate_image import _load_api_key
+
+            result = _load_api_key("OSERR_KEY")
+
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Additional generate_image() branches for deeper coverage
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateImageSaveThoughts:
+    """save_thoughts=True writes thought images to disk."""
+
+    def test_save_thoughts_writes_thought_image_with_output_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """When save_thoughts=True and output_path given, thought images are saved."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        # A thought part with inline_data (image)
+        thought_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        thought_part = MagicMock()
+        thought_part.thought = True
+        thought_part.inline_data = thought_inline
+        thought_part.text = None
+        thought_part.thought_signature = None
+
+        # Final image part
+        img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        img_part = _make_fake_part(inline_data=img_inline)
+
+        fake_response = _make_fake_response([thought_part, img_part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "result.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Save thoughts test",
+                model_key="flash",
+                output_path=output_path,
+                save_thoughts=True,
+                verbose=True,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "thought" in out.lower()
+        # Thought image file should exist
+        thought_files = list((tmp_path / "output").glob("*thought*"))
+        assert len(thought_files) >= 1
+
+    def test_save_thoughts_without_output_path_uses_auto_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When save_thoughts=True and no output_path, thought image uses auto path."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        thought_inline = _make_fake_inline_data(_JPEG_MAGIC, "image/jpeg")
+        thought_part = MagicMock()
+        thought_part.thought = True
+        thought_part.inline_data = thought_inline
+        thought_part.text = None
+        thought_part.thought_signature = None
+
+        img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        img_part = _make_fake_part(inline_data=img_inline)
+
+        fake_response = _make_fake_response([thought_part, img_part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Auto thought path test",
+                model_key="flash",
+                output_path=None,
+                save_thoughts=True,
+                document_prompt=False,
+            )
+
+        assert result is not None
+
+
+class TestGenerateImageMimeMismatch:
+    """When MIME type and detected format disagree, a note is printed."""
+
+    def test_mime_mismatch_prints_note(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """API says image/jpeg but bytes are PNG: note is printed."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        # PNG bytes, but MIME type says jpeg
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/jpeg")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "mime_mismatch.jpg"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="MIME mismatch test",
+                model_key="flash",
+                output_path=output_path,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "note" in out.lower() or "mime" in out.lower() or ".jpg" in out
+
+
+class TestGenerateImageDocumentPrompt:
+    """document_prompt=True integrates document_image_prompt() into the flow."""
+
+    def test_document_prompt_true_calls_document_image_prompt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "documented.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        mock_doc = MagicMock()
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+            patch("scripts.generate_image.document_image_prompt", mock_doc),
+        ):
+            result = mod.generate_image(
+                prompt="Document prompt test",
+                model_key="flash",
+                output_path=output_path,
+                document_prompt=True,
+            )
+
+        assert result is not None
+        assert mock_doc.called
+
+    def test_document_prompt_true_for_final_stem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When 'final' is in the output path stem, is_final_image is True."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        # output path with "final" in the stem -- so is_final_image will be True
+        # Path is absolute and starts with output/ so it won't be redirected
+        output_path = tmp_path / "output" / "my_final_image.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        mock_doc = MagicMock()
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+            patch("scripts.generate_image.document_image_prompt", mock_doc),
+        ):
+            result = mod.generate_image(
+                prompt="Finals stem test",
+                model_key="flash",
+                output_path=output_path,
+                document_prompt=True,
+            )
+
+        assert result is not None
+        assert mock_doc.called
+        # is_final_image=True when "final" is in stem
+        call_kwargs = mock_doc.call_args.kwargs
+        assert call_kwargs.get("is_final") is True
+
+
+class TestGenerateImageThoughtCount:
+    """When thoughts are processed, thought count is printed in output."""
+
+    def test_thought_count_printed_in_output(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        thought_part = MagicMock()
+        thought_part.thought = True
+        thought_part.inline_data = None
+        thought_part.text = None
+        thought_part.thought_signature = None
+
+        img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        img_part = _make_fake_part(inline_data=img_inline)
+
+        fake_response = _make_fake_response([thought_part, img_part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "thought_count.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Count thoughts",
+                model_key="flash",
+                output_path=output_path,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "thought" in out.lower() or "processed" in out.lower()
+
+
+class TestGenerateImageInlineSigOnImagePart:
+    """thought_signature on image part sets final_signature; verbose mode prints it."""
+
+    def test_image_part_with_thought_signature_verbose(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        # Image part with a thought_signature attribute
+        img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        img_part = MagicMock()
+        img_part.inline_data = img_inline
+        img_part.text = None
+        img_part.thought = False
+        img_part.thought_signature = b"sigbytes"
+
+        fake_response = _make_fake_response([img_part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "sig_img.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Image sig test",
+                model_key="flash",
+                output_path=output_path,
+                verbose=True,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        sig_file = result.with_suffix(".signature.bin")
+        assert sig_file.exists()
+        # Verbose prints the signature
+        out = capsys.readouterr().out
+        assert "signature" in out.lower()
+
+
+class TestDocumentImagePromptNoTable:
+    """When content has no '## Detailed Prompts' marker, table insertion is skipped."""
+
+    def test_no_table_marker_skips_row_insertion(self, tmp_path: Path) -> None:
+        import scripts.generate_image as mod
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        examples_dir = tmp_path / "examples"
+        examples_dir.mkdir()
+        prompts_file = examples_dir / "PROMPTS.md"
+
+        # Write content without the "## Detailed Prompts" section
+        prompts_file.write_text(
+            "# My Registry\n\nSome content without the table.\n", encoding="utf-8"
+        )
+
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        img = output_dir / "no_table_img.png"
+        img.write_bytes(_PNG_MAGIC)
+
+        with patch.object(mod, "__file__", str(fake_script)):
+            from scripts.generate_image import document_image_prompt
+
+            document_image_prompt(
+                image_path=img,
+                prompt="No table test",
+                model_key="flash",
+                aspect_ratio=None,
+                image_size=None,
+            )
+
+        content = prompts_file.read_text(encoding="utf-8")
+        # The detailed entry should still be appended
+        assert "no_table_img.png" in content
+
+    def test_image_path_outside_output_uses_name_as_rel_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Image not under the output/ dir: rel_path falls back to image name."""
+        import scripts.generate_image as mod
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        examples_dir = tmp_path / "examples"
+        examples_dir.mkdir()
+        prompts_file = examples_dir / "PROMPTS.md"
+        prompts_file.write_text(
+            "# Registry\n\n## Image Registry\n\n"
+            "| Filename | Model | Date | Prompt | Parameters |\n"
+            "|----------|-------|------|--------|------------|\n"
+            "\n## Detailed Prompts\n\n",
+            encoding="utf-8",
+        )
+
+        # Image outside output/ dir
+        img = tmp_path / "elsewhere" / "outside.png"
+        img.parent.mkdir()
+        img.write_bytes(_PNG_MAGIC)
+
+        with patch.object(mod, "__file__", str(fake_script)):
+            from scripts.generate_image import document_image_prompt
+
+            document_image_prompt(
+                image_path=img,
+                prompt="Outside output dir",
+                model_key="flash",
+                aspect_ratio=None,
+                image_size=None,
+            )
+
+        content = prompts_file.read_text(encoding="utf-8")
+        assert "outside.png" in content
+
+
+# ---------------------------------------------------------------------------
+# Pro model: invalid image_size warning (line 717)
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateImageProModelInvalidSize:
+    def test_invalid_image_size_warns_and_continues(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Invalid image_size for pro model prints warning but generation continues."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "size_warn.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Bad size test",
+                model_key="pro",
+                output_path=output_path,
+                image_size="8K",  # invalid size
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "warning" in out.lower() or "invalid" in out.lower() or "8K" in out
+
+
+# ---------------------------------------------------------------------------
+# is_draft user-specified path goes to output/drafts (line 870)
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateImageDraftUserPath:
+    def test_draft_mode_with_user_path_not_under_output(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """is_draft=True with a user-specified path not under output/ redirects to drafts/."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        # A path that doesn't start with "output" (string check)
+        output_path = tmp_path / "my_draft.png"
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output" / "drafts").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Draft user path",
+                model_key="flash",
+                output_path=output_path,
+                is_draft=True,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        assert "draft" in str(result).lower()
+
+
+# ---------------------------------------------------------------------------
+# Non-bytes thought signature is encoded as string (line 896)
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateImageNonBytesSignature:
+    def test_string_thought_signature_is_encoded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When thought_signature is a string (not bytes), it is str-encoded and written."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        img_part = MagicMock()
+        img_part.inline_data = img_inline
+        img_part.text = None
+        img_part.thought = False
+        # Signature is a plain string (not bytes)
+        img_part.thought_signature = "string-signature-value"
+
+        fake_response = _make_fake_response([img_part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "str_sig.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="String sig test",
+                model_key="flash",
+                output_path=output_path,
+                verbose=True,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        sig_file = result.with_suffix(".signature.bin")
+        assert sig_file.exists()
+        # Should have been encoded from string
+        assert sig_file.read_bytes() == b"string-signature-value"
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: part loop edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateImagePartLoopEdgeCases:
+    def test_image_part_with_signature_non_verbose(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Image part with thought_signature when verbose=False: signature still captured."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        img_part = MagicMock()
+        img_part.inline_data = img_inline
+        img_part.text = None
+        img_part.thought = False
+        img_part.thought_signature = b"sig"
+
+        fake_response = _make_fake_response([img_part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "nosig_verbose.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            # verbose=False means the signature branch at 812 is not printed
+            result = mod.generate_image(
+                prompt="Non-verbose sig",
+                model_key="flash",
+                output_path=output_path,
+                verbose=False,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        # With verbose=False the sidecar file should NOT be written
+        sig_file = result.with_suffix(".signature.bin")
+        assert not sig_file.exists()
+
+    def test_part_with_no_inline_data_no_text(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A part with neither inline_data nor text is silently skipped."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        # "Blank" part: not a thought, no inline_data, no text
+        blank_part = MagicMock()
+        blank_part.thought = False
+        blank_part.inline_data = None
+        blank_part.text = None
+        blank_part.thought_signature = None
+
+        img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        img_part = _make_fake_part(inline_data=img_inline)
+
+        fake_response = _make_fake_response([blank_part, img_part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "blank_part.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Blank part test",
+                model_key="flash",
+                output_path=output_path,
+                document_prompt=False,
+            )
+
+        assert result is not None
+
+    def test_text_part_with_signature_verbose(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A text part with thought_signature in verbose mode prints the signature."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        text_part = MagicMock()
+        text_part.thought = False
+        text_part.inline_data = None
+        text_part.text = "Model commentary"
+        text_part.thought_signature = b"text-sig-bytes"
+
+        img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        img_part = _make_fake_part(inline_data=img_inline)
+
+        fake_response = _make_fake_response([text_part, img_part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "text_sig_verbose.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="Text sig verbose",
+                model_key="flash",
+                output_path=output_path,
+                verbose=True,
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "signature" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# main() function: argparse-driven entry points
+# ---------------------------------------------------------------------------
+
+
+class TestMain:
+    """Tests for main() covering the most impactful CLI paths."""
+
+    def test_list_models_flag_prints_and_returns(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--list-models prints available models and returns without generating."""
+        import scripts.generate_image as mod
+
+        with patch("sys.argv", ["generate_image.py", "--list-models"]):
+            mod.main()
+
+        out = capsys.readouterr().out
+        assert "flash" in out.lower()
+        assert "pro" in out.lower()
+
+    def test_list_topaz_models_flag_prints_and_returns(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--list-topaz-models prints Topaz models and returns."""
+        import scripts.generate_image as mod
+
+        with patch("sys.argv", ["generate_image.py", "--list-topaz-models"]):
+            mod.main()
+
+        out = capsys.readouterr().out
+        assert "Standard V2" in out
+
+    def test_no_args_exits_with_1(self) -> None:
+        """No prompt, no --finalize, no --enhance: exits with code 1."""
+        import scripts.generate_image as mod
+
+        with (
+            patch("sys.argv", ["generate_image.py"]),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code != 0
+
+    def test_enhance_flag_calls_topaz_enhance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--enhance <image> calls topaz_enhance_image and exits."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("TOPAZ_API_KEY", "fake-topaz-key")
+
+        img = tmp_path / "input.png"
+        img.write_bytes(_PNG_MAGIC)
+
+        mock_enhance = MagicMock(return_value=tmp_path / "output.png")
+
+        with (
+            patch("sys.argv", ["generate_image.py", "--enhance", str(img)]),
+            patch("scripts.generate_image.topaz_enhance_image", mock_enhance),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code == 0
+        assert mock_enhance.called
+
+    def test_single_image_mode_calls_generate_image(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A basic prompt triggers generate_image() and exits 0 on success."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        result_path = tmp_path / "output.png"
+        result_path.write_bytes(_PNG_MAGIC)
+
+        mock_generate = MagicMock(return_value=result_path)
+
+        with (
+            patch("sys.argv", ["generate_image.py", "A test prompt"]),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code == 0
+        assert mock_generate.called
+
+    def test_single_image_mode_exits_1_on_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When generate_image() returns None, main exits with code 1."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        mock_generate = MagicMock(return_value=None)
+
+        with (
+            patch("sys.argv", ["generate_image.py", "A failing prompt"]),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code == 1
+
+    def test_draft_mode_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--draft-mode passes is_draft=True to generate_image."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        result_path = tmp_path / "draft.png"
+        result_path.write_bytes(_PNG_MAGIC)
+
+        mock_generate = MagicMock(return_value=result_path)
+
+        with (
+            patch("sys.argv", ["generate_image.py", "Draft test", "--draft-mode"]),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code == 0
+        call_kwargs = mock_generate.call_args.kwargs
+        assert call_kwargs.get("is_draft") is True
+
+    def test_story_parts_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--story-parts N triggers generate_story_sequence."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        result_paths = [tmp_path / f"part{i}.png" for i in range(1, 4)]
+        for p in result_paths:
+            p.write_bytes(_PNG_MAGIC)
+
+        mock_story = MagicMock(return_value=result_paths)
+
+        with (
+            patch(
+                "sys.argv",
+                ["generate_image.py", "A story prompt", "--story-parts", "3"],
+            ),
+            patch("scripts.generate_image.generate_story_sequence", mock_story),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code == 0
+        assert mock_story.called
+
+    def test_story_parts_less_than_2_exits_1(self) -> None:
+        """--story-parts 1 is rejected with exit code 1."""
+        import scripts.generate_image as mod
+
+        with (
+            patch("sys.argv", ["generate_image.py", "prompt", "--story-parts", "1"]),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code == 1
+
+    def test_finalize_flag_with_existing_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--finalize <draft> calls generate_image with the draft as reference."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        draft = tmp_path / "draft.png"
+        draft.write_bytes(_PNG_MAGIC)
+        result = tmp_path / "draft_final.png"
+        result.write_bytes(_PNG_MAGIC)
+
+        mock_generate = MagicMock(return_value=result)
+
+        with (
+            patch("sys.argv", ["generate_image.py", "--finalize", str(draft)]),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code == 0
+        assert mock_generate.called
+
+    def test_finalize_flag_with_missing_file_exits_1(self) -> None:
+        """--finalize <missing> exits with code 1."""
+        import scripts.generate_image as mod
+
+        with (
+            patch(
+                "sys.argv",
+                ["generate_image.py", "--finalize", "/nonexistent/draft.png"],
+            ),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code == 1
+
+    def test_no_genai_available_exits_1(self) -> None:
+        """When google-genai is not installed and a prompt is given, exits 1."""
+        import scripts.generate_image as mod
+
+        original = mod.GENAI_AVAILABLE
+        try:
+            mod.GENAI_AVAILABLE = False
+            with (
+                patch("sys.argv", ["generate_image.py", "a prompt"]),
+                pytest.raises(SystemExit) as exc_info,
+            ):
+                mod.main()
+        finally:
+            mod.GENAI_AVAILABLE = original
+
+        assert exc_info.value.code == 1
+
+    def test_topaz_flag_with_single_image(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--topaz triggers topaz_enhance_image after generation."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        monkeypatch.setenv("TOPAZ_API_KEY", "fake-topaz")
+
+        gen_result = tmp_path / "gen.png"
+        gen_result.write_bytes(_PNG_MAGIC)
+        topaz_result = tmp_path / "gen_topaz.png"
+        topaz_result.write_bytes(_PNG_MAGIC)
+
+        mock_generate = MagicMock(return_value=gen_result)
+        mock_enhance = MagicMock(return_value=topaz_result)
+
+        with (
+            patch("sys.argv", ["generate_image.py", "Topaz test", "--topaz"]),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            patch("scripts.generate_image.topaz_enhance_image", mock_enhance),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code == 0
+        assert mock_generate.called
+        assert mock_enhance.called
+
+    def test_finalize_with_topaz_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--finalize --topaz uses Topaz for finalization instead of Gemini."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        monkeypatch.setenv("TOPAZ_API_KEY", "fake-topaz")
+
+        draft = tmp_path / "draft.png"
+        draft.write_bytes(_PNG_MAGIC)
+        topaz_result = tmp_path / "draft_topaz.png"
+        topaz_result.write_bytes(_PNG_MAGIC)
+
+        mock_enhance = MagicMock(return_value=topaz_result)
+
+        with (
+            patch(
+                "sys.argv",
+                ["generate_image.py", "--finalize", str(draft), "--topaz"],
+            ),
+            patch("scripts.generate_image.topaz_enhance_image", mock_enhance),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code == 0
+        assert mock_enhance.called

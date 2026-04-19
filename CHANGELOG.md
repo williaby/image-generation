@@ -19,6 +19,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Coverage gate raised from 60% to 80% to match CLAUDE.md graduated coverage
+  requirement.
+- Pre-commit em-dash hook `types_or` filter removed; the filter was ANDed with
+  the `files` regex, silently excluding TOML, YAML, JSON, and RST files from
+  the check.
+- Ruff SIM102 and SIM108 violations resolved in `generate_image.py`: nested
+  `if` statements collapsed to compound conditions, ternary expressions used
+  where appropriate.
+- `getattr(part, "thought_signature", None)` replaces `hasattr` + direct
+  attribute access for `thought_signature` in `generate_image.py` to avoid a
+  potential `AttributeError` on absent attributes.
+- `datetime.UTC` import corrected in `generate_image.py`.
+- RAD markers (`#CRITICAL`, `#ASSUME`, `#EDGE`, `#VERIFY`) added to
+  `generate_image()` covering API key logging, response schema, and
+  `candidates[0].content is None` edge case.
+- `del mock.attribute` pattern replaced with `mock.attribute = None` in test
+  helpers; `del` on a fresh `MagicMock` raises `AttributeError` at runtime.
+- Dead unreachable `with patch` blocks removed from
+  `test_reads_key_from_dot_env_file`.
 - Unicode characters in argparse help strings and section comments replaced
   with ASCII equivalents to satisfy Ruff RUF001.
 - Bare `dict[]` key accesses on Topaz API JSON responses replaced with
