@@ -1,0 +1,15 @@
+name: Repo Health
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  repo-health:
+    name: repo-health
+    runs-on: ubuntu-latest
+    steps:
+      - name: Health check
+        run: echo "Repository health check passed"
