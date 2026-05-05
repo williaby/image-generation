@@ -1,0 +1,11 @@
+# REUSE Software Bill of Materials
+# https://reuse.software/
+version = 1
+SPDX-PackageName = "image-generation"
+SPDX-PackageSupplier = "Byron Williams"
+SPDX-PackageDownloadLocation = "https://github.com/williaby/image-generation"
+
+[[annotations]]
+path = ["**"]
+SPDX-License-Identifier = "MIT"
+SPDX-FileCopyrightText = "2025 Byron Williams"
