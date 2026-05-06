@@ -1,0 +1,72 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    ":preserveSemverRanges"
+  ],
+  "timezone": "America/New_York",
+  "schedule": [
+    "after 10pm every weekday",
+    "before 5am every weekday",
+    "every weekend"
+  ],
+  "labels": [
+    "dependencies",
+    "automated"
+  ],
+  "assignees": [
+    "ByronWilliamsCPA"
+  ],
+  "reviewers": [
+    "ByronWilliamsCPA"
+  ],
+  "packageRules": [
+    {
+      "description": "Auto-merge GitHub Actions minor/patch updates",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash"
+    },
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions",
+      "commitMessageTopic": "GitHub Actions"
+    },
+    {
+      "description": "Pin GitHub Actions to commit SHA",
+      "matchManagers": ["github-actions"],
+      "pinDigests": true
+    },
+    {
+      "description": "Python version updates - manual review required",
+      "matchDepTypes": ["python"],
+      "enabled": false,
+      "labels": ["dependencies", "python-version", "breaking-change"]
+    }
+  ],
+  "enabledManagers": [
+    "pep621",
+    "pip_requirements",
+    "github-actions"
+  ],
+  "separateMajorMinor": true,
+  "separateMinorPatch": false,
+  "prConcurrentLimit": 5,
+  "rebaseWhen": "conflicted",
+  "semanticCommits": "enabled",
+  "commitMessagePrefix": "chore(deps):",
+  "rangeStrategy": "bump",
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"],
+    "assignees": ["ByronWilliamsCPA"],
+    "reviewers": ["ByronWilliamsCPA"]
+  },
+  "osvVulnerabilityAlerts": true,
+  "transitiveRemediation": true
+}
