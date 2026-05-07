@@ -1,0 +1,96 @@
+# PR Validation Workflow
+# Validates PR title format (Conventional Commits) and non-empty PR body.
+name: PR Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches:
+      - main
+      - master
+
+permissions: {}
+
+concurrency:
+  group: pr-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  title-check:
+    name: PR Title Format
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7  # v2.10.1
+        with:
+          egress-policy: audit
+      - name: Validate conventional commit title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Conventional Commits: type(scope)!: description
+          PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^()]+\))?!?: .+'
+          if echo "$PR_TITLE" | grep -qE "$PATTERN"; then
+            echo "PR title follows Conventional Commits format."
+          else
+            echo "::error::PR title must follow Conventional Commits format."
+            echo "::error::  Expected: type(scope): description"
+            echo "::error::  Example:  feat(auth): add OAuth2 support"
+            echo "::error::  Got: $PR_TITLE"
+            exit 1
+          fi
+
+  body-check:
+    name: PR Body Non-Empty
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7  # v2.10.1
+        with:
+          egress-policy: audit
+      - name: Check PR body is non-empty
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ -z "$PR_BODY" ] || [ "$PR_BODY" = "null" ]; then
+            echo "::error::PR description is empty. Please describe what this PR does."
+            exit 1
+          fi
+          STRIPPED=$(echo "$PR_BODY" | tr -d '[:space:]')
+          if [ -z "$STRIPPED" ]; then
+            echo "::error::PR description contains only whitespace."
+            exit 1
+          fi
+          echo "PR body is present."
+
+  pr-validation-gate:
+    name: PR Validation Gate
+    runs-on: ubuntu-latest
+    needs: [title-check, body-check]
+    if: always()
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7  # v2.10.1
+        with:
+          egress-policy: audit
+      - name: Check all PR validation results
+        env:
+          TITLE_RESULT: ${{ needs.title-check.result }}
+          BODY_RESULT: ${{ needs.body-check.result }}
+        run: |
+          echo "## PR Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| PR Title Format | $TITLE_RESULT |" >> $GITHUB_STEP_SUMMARY
+          echo "| PR Body Non-Empty | $BODY_RESULT |" >> $GITHUB_STEP_SUMMARY
+          if [ "$TITLE_RESULT" != "success" ] || [ "$BODY_RESULT" != "success" ]; then
+            echo "::error::One or more PR validation checks failed."
+            exit 1
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All PR validation checks passed." >> $GITHUB_STEP_SUMMARY

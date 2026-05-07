@@ -1,0 +1,52 @@
+# Security Analysis Workflow
+# Delegates security scans to the org-level reusable workflow.
+name: Security Analysis
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Weekly scan on Mondays at 09:00 UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  security:
+    name: Security Analysis
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+      actions: read
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-security-analysis.yml@c22009ccaab0d3234819d30d9d7a03d53c531cb9 # main
+    with:
+      python-version: "3.12"
+      run-safety: false
+      run-codeql: false
+      run-dependency-review: false
+      run-osv: false
+      run-bandit: false
+
+  security-gate-validation:
+    name: Security Gate Validation
+    runs-on: ubuntu-latest
+    needs: [security]
+    if: always()
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7  # v2.10.1
+        with:
+          egress-policy: audit
+      - name: Check security scan results
+        env:
+          SECURITY_RESULT: ${{ needs.security.result }}
+        run: |
+          if [ "$SECURITY_RESULT" != "success" ]; then
+            echo "::error::Security Gate Validation failed: security scan result is $SECURITY_RESULT"
+            exit 1
+          fi
+          echo "Security Gate Validation passed"
