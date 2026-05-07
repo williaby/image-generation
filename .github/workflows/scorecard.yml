@@ -1,0 +1,32 @@
+# OpenSSF Scorecard for Claude Code Configuration
+# Delegates to the org-level reusable Scorecard workflow.
+#
+# Dashboard: https://securityscorecards.dev/viewer/?uri=github.com/ByronWilliamsCPA/.claude
+# Documentation: https://github.com/ossf/scorecard
+name: OpenSSF Scorecard
+
+on:
+  branch_protection_rule:
+  schedule:
+    # Weekly on Tuesdays at 21:21 UTC
+    - cron: '21 21 * * 2'
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scorecard:
+    name: Scorecard Analysis
+    permissions:
+      security-events: write
+      id-token: write
+      contents: read
+      actions: read
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-scorecard.yml@d18c93045bef4f6669488c7657543a5b7e04f8ed  # main
+    with:
+      publish-results: true
