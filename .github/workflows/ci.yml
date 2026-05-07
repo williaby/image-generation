@@ -1,0 +1,52 @@
+# CI/CD Pipeline for Claude Code Configuration
+# Delegates to the org-level reusable CI workflow for standard quality gates.
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  ci:
+    name: CI (Python 3.12)
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-ci.yml@16979833c433ecb375f884552312b9fdf8c5ba6a # main
+    with:
+      python-version: "3.12"
+      coverage-threshold: 80
+
+  # ==========================================================================
+  # CI Gate: aggregates the CI result; must pass for branch protection
+  # ==========================================================================
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+    needs: [ci]
+    if: always()
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7  # v2.10.1
+        with:
+          egress-policy: audit
+      - name: Check CI results
+        env:
+          CI_RESULT: ${{ needs.ci.result }}
+        run: |
+          if [ "$CI_RESULT" != "success" ]; then
+            echo "::error::CI Gate failed: CI result is $CI_RESULT"
+            exit 1
+          fi
+          echo "CI Gate passed"
