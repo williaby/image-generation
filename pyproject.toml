@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Gemini and Topaz Labs image generation and enhancement tools"
 requires-python = ">=3.12"
 dependencies = [
-    "google-genai>=0.4.0,<1.0.0",
+    "google-genai>=0.4.0,<2.0.0",
     "requests>=2.32.0,<3.0.0",
 ]
 
