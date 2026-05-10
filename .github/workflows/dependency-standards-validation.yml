@@ -1,0 +1,14 @@
+name: Dependency and Standards Validation
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  dep-standards:
+    name: Dependency & Standards Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Placeholder
+        run: echo "stub"
