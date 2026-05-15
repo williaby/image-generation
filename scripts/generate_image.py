@@ -4,8 +4,10 @@ Generate images using Google Gemini's image generation models, with optional
 Topaz Labs post-processing for professional-grade enhancement and upscaling.
 
 Supports:
-- Nano Banana (gemini-2.5-flash-preview-image-generation) - Fast generation
-- Nano Banana Pro (gemini-3-pro-image-preview) - 4K, better text rendering, Google Search grounding
+- Nano Banana (gemini-2.5-flash-image) - Legacy fast model
+- Nano Banana 2 (gemini-3.1-flash-image-preview) - Default; Pro-quality at Flash speed,
+  14 aspect ratios, 512/1K/2K/4K, configurable thinking, Search grounding
+- Nano Banana Pro (gemini-3-pro-image-preview) - Highest quality, best text rendering
 - Topaz Labs API - Post-generation enhancement: upscaling, denoising, sharpening, face enhancement
 
 Environment Variables:
@@ -19,13 +21,20 @@ Usage:
     # With output filename
     python generate_image.py "A futuristic city at sunset" -o city.png
 
-    # Using Nano Banana Pro model (Gemini 3)
+    # Using Nano Banana Pro model (Gemini 3 Pro, highest quality)
     python generate_image.py "A futuristic city at sunset" --model pro
+
+    # Using Nano Banana 2 (default; Pro-quality at Flash speed)
+    python generate_image.py "A futuristic city at sunset" --model flash-2
+
+    # Trade latency for quality on Nano Banana 2
+    python generate_image.py "A complex diagram" --model flash-2 --thinking high
 
     # With reference image for editing/style
     python generate_image.py "Make this building taller" -r reference.png
 
-    # With aspect ratio and resolution (pro model only)
+    # With aspect ratio and resolution
+    python generate_image.py "A landscape" --model flash-2 --aspect 21:9 --size 4K
     python generate_image.py "A landscape" --model pro --aspect 16:9 --size 4K
 
     # Show thinking process and save thought images (pro model only)
@@ -88,29 +97,55 @@ except ImportError:
 
 
 # Model configurations
-# Note: Actual API model IDs are gemini-2.5-flash-image and gemini-3-pro-image-preview
+# Each entry carries its own aspect_ratios / image_sizes because the three
+# Gemini image models accept different sets.
 MODELS = {
     "flash": {
         "id": "gemini-2.5-flash-image",
         "name": "Nano Banana (Gemini 2.5 Flash)",
-        "description": "Fast image generation model",
+        "description": "Legacy fast image generation model (no aspect/size control)",
         "supports_image_config": False,
+        "supports_thinking_config": False,
+        "aspect_ratios": [],
+        "image_sizes": [],
+    },
+    "flash-2": {
+        "id": "gemini-3.1-flash-image-preview",
+        "name": "Nano Banana 2 (Gemini 3.1 Flash Image)",
+        "description": "Pro-quality reasoning at Flash speed; 512/1K/2K/4K, 14 aspect ratios, configurable thinking, Search grounding",
+        "supports_image_config": True,
+        "supports_thinking_config": True,
+        "aspect_ratios": [
+            "1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3",
+            "4:5", "5:4", "8:1", "9:16", "16:9", "21:9",
+        ],
+        "image_sizes": ["512", "1K", "2K", "4K"],
     },
     "pro": {
         "id": "gemini-3-pro-image-preview",
         "name": "Nano Banana Pro (Gemini 3 Pro)",
-        "description": "4K resolution, better text rendering, Google Search grounding, thinking mode",
+        "description": "Highest quality, best text rendering, Google Search grounding, thinking mode",
         "supports_image_config": True,
+        "supports_thinking_config": False,
+        "aspect_ratios": ["1:1", "3:4", "4:3", "9:16", "16:9"],
+        "image_sizes": ["1K", "2K", "4K"],
     },
 }
 
-DEFAULT_MODEL = "pro"  # Default to Gemini 3 Pro for best quality
+DEFAULT_MODEL = "flash-2"  # Google's new default; Pro-quality at Flash speed.
 
-# Valid aspect ratios for pro model
-ASPECT_RATIOS = ["1:1", "3:4", "4:3", "9:16", "16:9"]
+# Union of valid aspect ratios across all models (used for argparse choices).
+# Per-model validation happens inside generate_image() against MODELS[key].
+ASPECT_RATIOS = [
+    "1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3",
+    "4:5", "5:4", "8:1", "9:16", "16:9", "21:9",
+]
 
-# Valid image sizes for pro model
-IMAGE_SIZES = ["1K", "2K", "4K"]
+# Union of valid image sizes across all models.
+IMAGE_SIZES = ["512", "1K", "2K", "4K"]
+
+# Valid thinking levels for models that support thinking_config.
+THINKING_LEVELS = ["minimal", "high"]
 
 # Topaz Labs API base URL
 TOPAZ_BASE_URL = "https://api.topazlabs.com/image/v1"
@@ -776,20 +811,22 @@ def generate_image(
     verbose: bool = False,
     is_draft: bool = False,
     document_prompt: bool = True,
+    thinking_level: str | None = None,
 ) -> Path | None:
     """
     Generate an image using Gemini.
 
     Args:
         prompt: Text description of the image to generate
-        model_key: Model to use ('flash' or 'pro')
+        model_key: Model to use ('flash', 'flash-2', or 'pro')
         reference_images: Optional list of reference images for editing/style
         output_path: Optional output file path
-        aspect_ratio: Aspect ratio for pro model (e.g., "16:9", "1:1")
-        image_size: Image size for pro model ("1K", "2K", "4K")
-        use_search: Enable Google Search grounding (pro model only)
-        save_thoughts: Save intermediate thought images (pro model only)
+        aspect_ratio: Aspect ratio (model-dependent; see MODELS[key]['aspect_ratios'])
+        image_size: Image size (model-dependent; see MODELS[key]['image_sizes'])
+        use_search: Enable Google Search grounding (pro/flash-2)
+        save_thoughts: Save intermediate thought images (pro/flash-2)
         verbose: Show detailed thinking process and thought signatures
+        thinking_level: 'minimal' or 'high' (flash-2 only)
 
     Returns:
         Path to the generated image, or None on failure
@@ -846,21 +883,25 @@ def generate_image(
         "response_modalities": ["IMAGE", "TEXT"],
     }
 
-    # Add image config for pro model
+    # Add image config for models that support it (pro, flash-2)
     if model_config.get("supports_image_config"):
+        model_aspects = model_config.get("aspect_ratios", [])
+        model_sizes = model_config.get("image_sizes", [])
         image_config_kwargs = {}
         if aspect_ratio:
-            if aspect_ratio not in ASPECT_RATIOS:
+            if aspect_ratio not in model_aspects:
                 print(
-                    f"Warning: Invalid aspect ratio '{aspect_ratio}'. Valid: {ASPECT_RATIOS}"
+                    f"Warning: Aspect ratio '{aspect_ratio}' not supported by {model_config['name']}."
+                    f" Valid for this model: {model_aspects}"
                 )
             else:
                 image_config_kwargs["aspect_ratio"] = aspect_ratio
                 print(f"Aspect ratio: {aspect_ratio}")
         if image_size:
-            if image_size not in IMAGE_SIZES:
+            if image_size not in model_sizes:
                 print(
-                    f"Warning: Invalid image size '{image_size}'. Valid: {IMAGE_SIZES}"
+                    f"Warning: Image size '{image_size}' not supported by {model_config['name']}."
+                    f" Valid for this model: {model_sizes}"
                 )
             else:
                 image_config_kwargs["image_size"] = image_size
@@ -873,6 +914,23 @@ def generate_image(
         if use_search:
             config_kwargs["tools"] = [{"google_search": {}}]
             print("Google Search grounding: enabled")
+
+    # Add thinking config for models that expose thinking_level (flash-2 only).
+    if thinking_level:
+        if not model_config.get("supports_thinking_config"):
+            print(
+                f"Warning: --thinking has no effect on {model_config['name']};"
+                f" only flash-2 exposes thinking_level."
+            )
+        elif thinking_level not in THINKING_LEVELS:
+            print(
+                f"Warning: Invalid thinking level '{thinking_level}'. Valid: {THINKING_LEVELS}"
+            )
+        else:
+            config_kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_level=thinking_level
+            )
+            print(f"Thinking level: {thinking_level}")
 
     # Configure generation
     generate_config = types.GenerateContentConfig(**config_kwargs)
@@ -1106,6 +1164,7 @@ def generate_story_sequence(
     aspect_ratio: str | None = None,
     image_size: str | None = None,
     verbose: bool = False,
+    thinking_level: str | None = None,
 ) -> list[Path]:
     """
     Generate a multi-part story sequence using conversational refinement.
@@ -1174,6 +1233,7 @@ def generate_story_sequence(
             use_search=False,
             save_thoughts=False,
             verbose=verbose,
+            thinking_level=thinking_level,
         )
 
         if result:
@@ -1210,7 +1270,7 @@ def list_models():
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Generate images using Google Gemini (Nano Banana / Nano Banana Pro)",
+        description="Generate images using Google Gemini (Nano Banana / Nano Banana 2 / Nano Banana Pro)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1271,25 +1331,34 @@ Examples:
     parser.add_argument(
         "--aspect",
         choices=ASPECT_RATIOS,
-        help="Aspect ratio (pro model only): 1:1, 3:4, 4:3, 9:16, 16:9",
+        help=(
+            "Aspect ratio (model-dependent). pro: 1:1, 3:4, 4:3, 9:16, 16:9. "
+            "flash-2 also supports: 1:4, 1:8, 2:3, 3:2, 4:1, 4:5, 5:4, 8:1, 21:9."
+        ),
     )
 
     parser.add_argument(
         "--size",
         choices=IMAGE_SIZES,
-        help="Image size (pro model only): 1K, 2K, 4K",
+        help="Image size (model-dependent). flash-2: 512, 1K, 2K, 4K. pro: 1K, 2K, 4K.",
+    )
+
+    parser.add_argument(
+        "--thinking",
+        choices=THINKING_LEVELS,
+        help="Thinking level for flash-2 (minimal=faster, high=better quality). Ignored on other models.",
     )
 
     parser.add_argument(
         "--search",
         action="store_true",
-        help="Enable Google Search grounding for real-time data (pro model only)",
+        help="Enable Google Search grounding for real-time data (pro / flash-2)",
     )
 
     parser.add_argument(
         "--save-thoughts",
         action="store_true",
-        help="Save intermediate thought images (pro model only)",
+        help="Save intermediate thought images (pro / flash-2)",
     )
 
     parser.add_argument(
@@ -1498,6 +1567,7 @@ Examples:
             use_search=False,
             save_thoughts=args.save_thoughts,
             verbose=args.verbose,
+            thinking_level=args.thinking,
         )
 
         if result:
@@ -1525,6 +1595,7 @@ Examples:
             aspect_ratio=args.aspect,
             image_size=args.size,
             verbose=args.verbose,
+            thinking_level=args.thinking,
         )
 
         if args.topaz and results:
@@ -1567,6 +1638,7 @@ Examples:
             verbose=args.verbose,
             is_draft=args.draft_mode,
             document_prompt=True,
+            thinking_level=args.thinking,
         )
 
         if result and args.topaz:

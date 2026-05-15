@@ -529,6 +529,9 @@ class TestListModels:
         out = capsys.readouterr().out
         assert "flash" in out.lower()
         assert "pro" in out.lower()
+        # Nano Banana 2 (gemini-3.1-flash-image-preview)
+        assert "flash-2" in out.lower()
+        assert "gemini-3.1-flash-image-preview" in out
 
 
 # ---------------------------------------------------------------------------

@@ -9,9 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Nano Banana 2 (`gemini-3.1-flash-image-preview`) as the new `flash-2` model
+  and the default. Supports 14 aspect ratios (`1:1, 1:4, 1:8, 2:3, 3:2, 3:4,
+  4:1, 4:3, 4:5, 5:4, 8:1, 9:16, 16:9, 21:9`) and a new `512` resolution tier
+  alongside `1K`, `2K`, `4K`.
+- `--thinking minimal|high` flag, mapped to `types.ThinkingConfig(thinking_level=...)`,
+  for trading latency vs. quality on flash-2.
+- Per-model aspect ratio and image size lists in the `MODELS` dict; validation
+  now checks against the selected model rather than a global union, so
+  unsupported combinations (e.g. `--model pro --aspect 21:9`) emit a clear
+  warning naming the active model.
 - Topaz Labs API integration as an optional post-processing pipeline for
   generated images (`--enhance`, `--topaz-model`, `--topaz-sharpen`,
   `--topaz-denoise`, `--topaz-face`, `--topaz-face-strength` flags).
+
+### Changed
+
+- Default `--model` is now `flash-2` (was `pro`). Pro remains available for
+  highest-fidelity text rendering on technical diagrams.
 - SSRF protection for Topaz image downloads: hostname validated against an
   allowlist (`api.topazlabs.com`, `cdn.topazlabs.com`) before fetching.
 - RAD annotations (`#CRITICAL`, `#ASSUME`) marking external-API assumptions
