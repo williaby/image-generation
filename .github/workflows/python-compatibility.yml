@@ -37,7 +37,11 @@ jobs:
     name: Python Compatibility Matrix
     uses: ByronWilliamsCPA/.github/.github/workflows/python-compatibility.yml@c22009ccaab0d3234819d30d9d7a03d53c531cb9  # main
     with:
-      python-versions: '["3.10", "3.11", "3.12", "3.13"]'
+      # Matrix kept in lockstep with pyproject.toml `requires-python = ">=3.12"`.
+      # 3.10/3.11 were removed because pip refuses installs on those versions
+      # under the current requires-python, making those cells either red or
+      # silently mis-resolved to a newer interpreter.
+      python-versions: '["3.12", "3.13"]'
       operating-systems: '["ubuntu-latest"]'
       include-macos: true
       include-windows: true
