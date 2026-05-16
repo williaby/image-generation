@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allowlist (`api.topazlabs.com`, `cdn.topazlabs.com`) before fetching.
 - RAD annotations (`#CRITICAL`, `#ASSUME`) marking external-API assumptions
   in `topaz_enhance_image` for future verification.
+- `renovate.json` configuration to re-enable Renovate dependency updates
+  after the onboarding PR was closed without merging. Covers `pep621`,
+  `pip_requirements`, `github-actions`, and `pre-commit` managers, with
+  weekly `lockFileMaintenance` to keep `uv.lock` in sync, auto-merge for
+  GitHub Actions minor/patch bumps, SHA pinning for actions, and manual
+  review gating for Python version updates.
 
 ### Fixed
 

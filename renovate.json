@@ -43,8 +43,8 @@
       "pinDigests": true
     },
     {
-      "description": "Python version updates - manual review required",
-      "matchDepTypes": ["python"],
+      "description": "Disable automated Python version (requires-python) updates; bump manually when ready",
+      "matchDepTypes": ["requires-python"],
       "enabled": false,
       "labels": ["dependencies", "python-version", "breaking-change"]
     }
@@ -52,8 +52,14 @@
   "enabledManagers": [
     "pep621",
     "pip_requirements",
-    "github-actions"
+    "github-actions",
+    "pre-commit"
   ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 5am on monday"],
+    "commitMessageAction": "Refresh"
+  },
   "separateMajorMinor": true,
   "separateMinorPatch": false,
   "prConcurrentLimit": 5,
