@@ -75,9 +75,10 @@ Thumbs.db
 *.tmp
 *.temp
 
-# Qlty code quality tool
-.qlty/
+# Qlty code quality tool (track config only)
+.qlty/*
+!.qlty/qlty.toml
 
-# Local Claude Code configuration (project-specific, not for version control)
-.claude/
-CLAUDE.md
+# Worktrees and compliance report artifacts
+.worktrees/
+docs/compliance-reports/
