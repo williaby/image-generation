@@ -8,14 +8,14 @@ on:
   push:
     branches: [main, master]
     paths:
-      - 'src/**/*.py'
+      - 'scripts/**/*.py'
       - 'tests/**/*.py'
       - 'pyproject.toml'
       - 'uv.lock'
   pull_request:
     branches: [main, master, develop]
     paths:
-      - 'src/**/*.py'
+      - 'scripts/**/*.py'
       - 'tests/**/*.py'
       - 'pyproject.toml'
       - 'uv.lock'
@@ -41,7 +41,7 @@ jobs:
       operating-systems: '["ubuntu-latest"]'
       include-macos: true
       include-windows: true
-      source-directory: 'src'
+      source-directory: 'scripts'
       test-command: 'pytest tests/ -v --tb=short -x --ignore=tests/integration --ignore=tests/load -m "not slow and not integration"'
       coverage-report: false
       fail-fast: false
