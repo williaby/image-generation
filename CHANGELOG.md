@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `bandit` and `safety` to dev dependencies so the org-level reusable CI
+  workflow (`python-ci.yml`) can spawn both tools without a missing-binary
+  fallback that crashes the security job under `set -e`.
+- Direct pin of `urllib3>=2.7.0,<3.0.0` to address CVE-2026-44431 and
+  CVE-2026-44432 (HIGH severity, transitive via `requests`).
 - Topaz Labs API integration as an optional post-processing pipeline for
   generated images (`--enhance`, `--topaz-model`, `--topaz-sharpen`,
   `--topaz-denoise`, `--topaz-face`, `--topaz-face-strength` flags).
@@ -19,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CI now passes `source-directory: scripts` to the reusable
+  `ByronWilliamsCPA/.github` Python CI and compatibility workflows; the
+  default `'src'` did not match this repo's layout and made ruff fail
+  immediately with `Failed to format src: No such file or directory`. The
+  `paths:` filter in `python-compatibility.yml` was updated to match
+  (`'scripts/**/*.py'` instead of `'src/**/*.py'`).
 - Coverage gate raised from 60% to 80% to match CLAUDE.md graduated coverage
   requirement.
 - Pre-commit em-dash hook `types_or` filter removed; the filter was ANDed with
