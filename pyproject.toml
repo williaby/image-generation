@@ -6,6 +6,9 @@ requires-python = ">=3.12"
 dependencies = [
     "google-genai>=0.4.0,<2.0.0",
     "requests>=2.32.0,<3.0.0",
+    # Pinned to address CVE-2026-44431 and CVE-2026-44432 (HIGH);
+    # transitive via requests, fixed in 2.7.0.
+    "urllib3>=2.7.0,<3.0.0",
 ]
 
 [project.optional-dependencies]
