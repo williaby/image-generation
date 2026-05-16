@@ -1,0 +1,9 @@
+# Repo-wide shellcheck configuration.
+# Read by shellcheck and by actionlint (which embeds shellcheck) when invoked
+# from the repo root.
+
+# SC2129: Consider using { cmd1; cmd2; } >> file instead of individual
+#         redirects. Stylistic preference. The repo's existing workflows
+#         use repeated >> redirects consistently; treating this as an
+#         error would block every PR until unrelated files are rewritten.
+disable=SC2129
