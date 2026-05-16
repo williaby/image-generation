@@ -388,6 +388,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "google-genai" },
     { name = "requests" },
+    { name = "urllib3" },
 ]
 
 [package.optional-dependencies]
@@ -408,6 +409,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "requests", specifier = ">=2.32.0,<3.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
+    { name = "urllib3", specifier = ">=2.7.0,<3.0.0" },
 ]
 provides-extras = ["dev"]
 

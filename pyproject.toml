@@ -6,6 +6,12 @@ requires-python = ">=3.12"
 dependencies = [
     "google-genai>=0.4.0,<2.0.0",
     "requests>=2.32.0,<3.0.0",
+    # Pinned to address CVE-2026-44431 (sensitive header leak on proxied
+    # low-level redirects) and CVE-2026-44432 (decompression-bomb safeguard
+    # bypass in streaming API). Both fixed in 2.7.0. urllib3 is a transitive
+    # dependency via requests; explicit pin ensures the resolver picks a
+    # patched version.
+    "urllib3>=2.7.0,<3.0.0",
 ]
 
 [project.optional-dependencies]

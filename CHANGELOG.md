@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Pinned `urllib3>=2.7.0,<3.0.0` (transitive via `requests`) to address
+  CVE-2026-44431 (sensitive headers forwarded across origins in proxied
+  low-level redirects, affects 1.23..<2.7.0) and CVE-2026-44432
+  (decompression-bomb safeguards bypassed in parts of the streaming API,
+  affects 2.6.0..<2.7.0). Resolver moves urllib3 from 2.6.3 to 2.7.0.
+
+### Changed
+
+- `python-compatibility.yml` `paths:` filters and `source-directory:` aligned
+  from `src/` to `scripts/` to match this repo's actual layout. The previous
+  `src/` references were a copy-paste leftover from the org template; no
+  `src/` directory exists in this repo, so the workflow's path-trigger never
+  fired on Python changes.
+
 ### Added
 
 - Topaz Labs API integration as an optional post-processing pipeline for
