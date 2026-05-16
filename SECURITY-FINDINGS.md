@@ -158,24 +158,20 @@ Fixes applied in this PR:
   first step of the `fips-check` job, and added
   `persist-credentials: false` to the existing checkout.
 
-Outstanding (recommend follow-up, not auto-applied):
+Resolved in a follow-up commit on this branch:
 
-- **`coverage.yml` line 26**: still references the org reusable
-  workflow at `@main`:
-  ```yaml
-  uses: ByronWilliamsCPA/.github/.github/workflows/python-qlty-coverage.yml@main
-  ```
-  All other call sites of `ByronWilliamsCPA/.github/...` in this
-  repository are pinned to a 40-character commit SHA (for example
-  `c22009ccaab0d3234819d30d9d7a03d53c531cb9` and
-  `d18c93045bef4f6669488c7657543a5b7e04f8ed`). A floating `@main` ref
-  defeats the rest of the supply-chain hardening: a malicious or
-  reverted commit on the upstream `main` would immediately execute
-  with this repo's `QLTY_COVERAGE_TOKEN`. The fix is to pin to the
-  current HEAD SHA of `python-qlty-coverage.yml@main`; that SHA must
-  be obtained from the upstream repository, so it is left for the
-  maintainer of `ByronWilliamsCPA/.github` to confirm rather than
-  guessed here.
+- **`coverage.yml` line 26**: was previously pinned to `@main` (floating
+  ref). Now pinned to commit SHA
+  `732c0e313c250b7702d1a9ba75bfc4edb07dd830` of
+  `ByronWilliamsCPA/.github`. Renovate will surface upstream updates.
+- **`fips-compatibility.yml` and `repo-health.yml` `harden-runner`**:
+  initially introduced at v2.10.1 to match `codeql.yml` /
+  `security-analysis.yml` / `pr-validation.yml`. Now upgraded to v2.19.1
+  (`a5ad31d6a139d249332a2605b85202e8c0b78450`) to match `ci.yml` and
+  `reuse.yml`, eliminating the within-repo version skew. The same upgrade
+  should be applied to the other three callers in a separate PR.
+
+Outstanding (recommend follow-up, not auto-applied):
 
 - **Reusable-workflow caller jobs** (`coverage.yml`, `python-compatibility.yml`,
   `sbom.yml`, `scorecard.yml`): a caller job whose only step is `uses:`
@@ -183,6 +179,11 @@ Outstanding (recommend follow-up, not auto-applied):
   these jobs must live inside the reusable workflow itself. This is
   not a regression; the org reusable workflow is the right place to
   enforce it.
+
+- **`harden-runner` egress policy is `audit` (log-only)**: blocking mode
+  requires curating an explicit allow-list per workflow. Suggested
+  follow-up: enumerate egress destinations for the FIPS and repo-health
+  jobs and switch them to `block`.
 
 ### 2.5 Dependency surface
 
