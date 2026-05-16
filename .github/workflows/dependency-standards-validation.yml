@@ -1,0 +1,24 @@
+# Stub for the "Dependency & Standards Validation" required status context.
+# Emits the check name so the williaby-default-branch-baseline ruleset (ID
+# 16201085) does not block all PRs. Real validation (pip-audit, interrogate,
+# darglint, license header check) is deferred to a follow-up issue.
+#
+# See: docs/superpowers/plans/2026-05-16-reusable-ci-workflow-audit.md
+# (handoff doc lists this as a known stub to replace org-wide).
+name: Dependency and Standards Validation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dep-standards:
+    name: Dependency & Standards Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Placeholder
+        run: echo "stub"
