@@ -55,15 +55,18 @@ import argparse
 import base64
 import os
 import secrets
+import stat
 import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-# Hard cap on reference / enhancement input image size. 4K PNGs are ~10 MB;
-# 100 MB is generous and protects against pathological local inputs that would
-# otherwise be fully loaded into memory and base64-encoded (~1.33x expansion).
+# Hard cap on reference / enhancement input image size. 4K PNGs are ~10 MiB;
+# 100 MiB is generous and protects against pathological local inputs that would
+# otherwise be fully loaded into memory. Peak memory is roughly 2.33x the input
+# size because both the raw bytes and the base64-encoded copy (~1.33x expansion)
+# are held simultaneously before the API call.
 MAX_INPUT_IMAGE_BYTES = 100 * 1024 * 1024
 
 GENAI_AVAILABLE = True
@@ -192,8 +195,11 @@ def _load_api_key(env_var: str) -> str | None:
                                 line.split("=", 1)[1].strip().strip('"').strip("'")
                             )
                             break
-            except OSError:
-                pass
+            except OSError as exc:
+                print(
+                    f"Warning: could not read {env_file}: {exc}",
+                    file=sys.stderr,
+                )
     return api_key or None
 
 
@@ -236,23 +242,38 @@ def topaz_enhance_image(
     Generative models (Wonder, Bloom): 2-4 MP per credit, significantly more expensive.
     """
     if not REQUESTS_AVAILABLE:
-        print("Error: 'requests' package is required for Topaz enhancement.")
-        print("Install with: pip install requests")
+        print(
+            "Error: 'requests' package is required for Topaz enhancement.",
+            file=sys.stderr,
+        )
+        print("Install with: pip install requests", file=sys.stderr)
         return None
 
     api_key = get_topaz_api_key()
     if not api_key:
         return None
 
-    if not input_path.exists():
-        print(f"Error: Input image not found: {input_path}")
-        return None
-
+    # stat() also covers the "missing file" case via FileNotFoundError,
+    # which is a subclass of OSError. The explicit exists() check was
+    # redundant and made the FileNotFoundError branch unreachable.
+    # Follow symlinks so a symlink-to-regular-file is still accepted, but
+    # reject character devices (/dev/zero), FIFOs, and other non-regular
+    # files where st_size is meaningless and would bypass the size cap.
     try:
-        input_size = input_path.stat().st_size
+        resolved_stat = input_path.resolve().stat()
+    except FileNotFoundError:
+        print(f"Error: Input image not found: {input_path}", file=sys.stderr)
+        return None
     except OSError as e:
         print(f"Error: Cannot stat input image {input_path}: {e}", file=sys.stderr)
         return None
+    if not stat.S_ISREG(resolved_stat.st_mode):
+        print(
+            f"Error: Input image {input_path} is not a regular file.",
+            file=sys.stderr,
+        )
+        return None
+    input_size = resolved_stat.st_size
     if input_size > MAX_INPUT_IMAGE_BYTES:
         print(
             f"Error: Input image {input_path} is {input_size} bytes; "
@@ -317,7 +338,11 @@ def topaz_enhance_image(
         if face_enhancement_strength is not None:
             data["face_enhancement_strength"] = face_enhancement_strength
 
-    # Submit async job
+    # Submit async job. Narrowing: catch network errors (RequestException
+    # covers timeouts, HTTP errors, connection failures) and the parsing-
+    # adjacent ValueError / KeyError that arises from a malformed response
+    # body. Other exceptions (KeyboardInterrupt, MemoryError, programmer
+    # bugs) should propagate.
     try:
         with open(input_path, "rb") as f:
             resp = requests.post(
@@ -328,8 +353,11 @@ def topaz_enhance_image(
                 timeout=30,
             )
         resp.raise_for_status()
-    except Exception as e:
+    except (requests.RequestException, ValueError, KeyError) as e:
         print(f"Error submitting Topaz job: {e}", file=sys.stderr)
+        return None
+    except OSError as e:
+        print(f"Error reading Topaz input file: {e}", file=sys.stderr)
         return None
 
     process_id = resp.json().get("process_id")
@@ -370,7 +398,7 @@ def topaz_enhance_image(
                     file=sys.stderr,
                 )
                 return None
-        except Exception as e:
+        except (requests.RequestException, ValueError, KeyError) as e:
             print(
                 f"Error polling Topaz status for job {process_id}: {e}", file=sys.stderr
             )
@@ -391,7 +419,7 @@ def topaz_enhance_image(
             timeout=15,
         )
         dl_resp.raise_for_status()
-    except Exception as e:
+    except (requests.RequestException, ValueError, KeyError) as e:
         print(
             f"Error getting Topaz download URL for job {process_id}: {e}",
             file=sys.stderr,
@@ -421,7 +449,7 @@ def topaz_enhance_image(
         img_resp = requests.get(download_url, timeout=120, allow_redirects=False)
         img_resp.raise_for_status()
         image_data = img_resp.content
-    except Exception as e:
+    except (requests.RequestException, ValueError, KeyError) as e:
         print(
             f"Error downloading Topaz result for job {process_id}: {e}", file=sys.stderr
         )
@@ -514,10 +542,16 @@ def load_image_as_base64(image_path: Path) -> tuple[str, str]:
     not from file extension, to avoid MIME type mismatches.
 
     Enforces MAX_INPUT_IMAGE_BYTES to bound peak memory use when a caller
-    points at an unexpectedly large file. Missing files raise
-    FileNotFoundError (from stat) which the caller is expected to handle.
+    points at an unexpectedly large file. Rejects non-regular files (FIFOs,
+    character devices like /dev/zero) where st_size is meaningless and
+    would bypass the size cap. Missing files raise FileNotFoundError (from
+    stat) and oversize / non-regular files raise ValueError; both are caught
+    by the call site in generate_image().
     """
-    size = image_path.stat().st_size
+    resolved_stat = image_path.resolve().stat()
+    if not stat.S_ISREG(resolved_stat.st_mode):
+        raise ValueError(f"Reference image {image_path} is not a regular file.")
+    size = resolved_stat.st_size
     if size > MAX_INPUT_IMAGE_BYTES:
         raise ValueError(
             f"Reference image {image_path} is {size} bytes; "
@@ -625,11 +659,16 @@ This folder contains images generated by AI models. Each entry documents the mod
         for ref in reference_images:
             detailed_entry += f"  - {ref.name}\n"
 
-    # Render the prompt as an indented code block (CommonMark: any line indented
-    # with at least 4 spaces is code). This is robust against prompts that
-    # contain triple-backtick fences, which would otherwise let attacker- or
-    # user-supplied content escape into rendered Markdown.
-    indented_prompt = "\n".join("    " + line for line in prompt.splitlines() or [""])
+    # Render the prompt as an indented code block. The detailed entry sits
+    # inside a Markdown list item ('- **Prompt**:'), whose content indent is
+    # column 2. Per CommonMark, an indented code block within a list item
+    # requires content-indent + 4 spaces = 6 spaces total. Using only 4 here
+    # would render as paragraph continuation, leaving triple-backtick fences
+    # in the prompt free to escape into rendered Markdown.
+    lines = prompt.splitlines() if prompt else []
+    indented_prompt = (
+        "\n".join("      " + line for line in lines) if lines else "      "
+    )
     detailed_entry += f"""- **Prompt**:
 
 {indented_prompt}
@@ -723,7 +762,14 @@ def generate_image(
                 continue
 
             print(f"Including reference image: {img_path}")
-            img_data, mime_type = load_image_as_base64(img_path)
+            try:
+                img_data, mime_type = load_image_as_base64(img_path)
+            except (ValueError, OSError) as exc:
+                print(
+                    f"Error: cannot load reference image {img_path}: {exc}",
+                    file=sys.stderr,
+                )
+                return None
             contents.append(
                 types.Part.from_bytes(
                     data=base64.standard_b64decode(img_data),
@@ -829,10 +875,15 @@ def generate_image(
                             / f"{output_path.stem}_thought{thought_count}{thought_ext}"
                         )
                     else:
+                        # Anchor under {repo}/output rather than CWD so
+                        # repeated runs (and the test suite) do not litter
+                        # whichever directory the script was invoked from.
                         timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
-                        token = secrets.token_hex(4)
-                        thought_path = Path(
-                            f"thought{thought_count}_{timestamp}_{token}{thought_ext}"
+                        token = secrets.token_hex(16)
+                        thought_path = (
+                            Path(__file__).parent.parent
+                            / "output"
+                            / f"thought{thought_count}_{timestamp}_{token}{thought_ext}"
                         )
 
                     thought_path.parent.mkdir(parents=True, exist_ok=True)
@@ -889,7 +940,7 @@ def generate_image(
                 # Random suffix makes default filenames non-guessable when the
                 # output/ directory is later served or shared. Avoids reliance
                 # on second-resolution timestamps for uniqueness.
-                token = secrets.token_hex(4)
+                token = secrets.token_hex(16)
                 ext = detected_ext  # Use detected format, not MIME type
 
                 # Auto-organize: drafts go to drafts/, finals would go to root
@@ -947,22 +998,32 @@ def generate_image(
                         f.write(str(final_signature).encode())
                 print(f"Thought signature saved to: {sig_path}")
 
-            # Document prompt if requested
+            # Document prompt if requested. Wrap in its own guard so that a
+            # failure to update PROMPTS.md (disk full, encoding error in the
+            # escape logic, etc.) does not surface as "Error generating image"
+            # after the image has already been written to disk.
             if document_prompt:
                 is_final_image = (
                     "final" in output_path.stem.lower()
                     or output_path.parent.name == "finals"
                 )
-                document_image_prompt(
-                    image_path=output_path,
-                    prompt=prompt,
-                    model_key=model_key,
-                    aspect_ratio=aspect_ratio,
-                    image_size=image_size,
-                    reference_images=reference_images,
-                    is_draft=is_draft,
-                    is_final=is_final_image,
-                )
+                try:
+                    document_image_prompt(
+                        image_path=output_path,
+                        prompt=prompt,
+                        model_key=model_key,
+                        aspect_ratio=aspect_ratio,
+                        image_size=image_size,
+                        reference_images=reference_images,
+                        is_draft=is_draft,
+                        is_final=is_final_image,
+                    )
+                except OSError as exc:
+                    print(
+                        f"Warning: image saved to {output_path} but PROMPTS.md "
+                        f"update failed: {exc}",
+                        file=sys.stderr,
+                    )
 
             return output_path
 
@@ -1006,7 +1067,7 @@ def generate_story_sequence(
 
     if output_prefix is None:
         timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
-        token = secrets.token_hex(4)
+        token = secrets.token_hex(16)
         output_prefix = Path(f"story_{timestamp}_{token}")
 
     get_api_key()  # Validate API key exists
