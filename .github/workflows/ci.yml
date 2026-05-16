@@ -27,6 +27,7 @@ jobs:
     with:
       python-version: "3.12"
       coverage-threshold: 80
+      source-directory: scripts
 
   # ==========================================================================
   # CI Gate: aggregates the CI result; must pass for branch protection
