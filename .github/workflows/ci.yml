@@ -83,6 +83,11 @@ jobs:
         with:
           fail_level: error
           reporter: github-check
+          # SC2129 is a stylistic preference (use { cmd1; cmd2; } >> file
+          # instead of repeated >> file). The repo's existing workflows use
+          # the latter style; do not fail builds on it. All other shellcheck
+          # rules remain active.
+          actionlint_flags: -ignore "SC2129"
 
   ci-gate:
     name: CI Gate
