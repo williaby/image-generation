@@ -23,7 +23,7 @@ jobs:
       pull-requests: read
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7  # v2.10.1
+        uses: step-security/harden-runner@9ca718d3bf646d6534007c269a635b3e54cadf99  # v2.19.2
         with:
           egress-policy: audit
       - name: Validate conventional commit title
@@ -49,7 +49,7 @@ jobs:
       pull-requests: read
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7  # v2.10.1
+        uses: step-security/harden-runner@9ca718d3bf646d6534007c269a635b3e54cadf99  # v2.19.2
         with:
           egress-policy: audit
       - name: Check PR body is non-empty
@@ -74,7 +74,7 @@ jobs:
     if: always()
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7  # v2.10.1
+        uses: step-security/harden-runner@9ca718d3bf646d6534007c269a635b3e54cadf99  # v2.19.2
         with:
           egress-policy: audit
       - name: Check all PR validation results
