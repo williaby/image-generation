@@ -1,0 +1,30 @@
+# Permissive yamllint config for a config-repo with diverse YAML content
+# (GitHub workflows, agent prompts, pre-commit configs).
+extends: default
+
+ignore: |
+  .git/
+  .venv/
+  .worktrees/
+  node_modules/
+  .ruff_cache/
+  .pytest_cache/
+  .qlty/
+
+rules:
+  line-length:
+    max: 200
+    level: warning
+  document-start: disable
+  truthy:
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  indentation:
+    spaces: consistent
+    indent-sequences: consistent
+  braces:
+    max-spaces-inside: 1
+  brackets:
+    max-spaces-inside: 1
