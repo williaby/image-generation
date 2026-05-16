@@ -183,8 +183,8 @@ class TestUnknownModel:
         result = topaz_enhance_image(inp, model="NonExistentModel9999")
 
         assert result is None
-        out = capsys.readouterr().out
-        assert "unknown" in out.lower() or "nonexistentmodel" in out.lower()
+        err = capsys.readouterr().err
+        assert "unknown" in err.lower() or "nonexistentmodel" in err.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +207,8 @@ class TestInvalidOutputFormat:
         result = topaz_enhance_image(inp, output_format="bmp")
 
         assert result is None
-        out = capsys.readouterr().out
-        assert "output_format" in out.lower() or "bmp" in out.lower()
+        err = capsys.readouterr().err
+        assert "output_format" in err.lower() or "bmp" in err.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -271,8 +271,8 @@ class TestStrengthOutOfRange:
         result = topaz_enhance_image(inp, **kwargs)
 
         assert result is None
-        out = capsys.readouterr().out
-        assert "0.0" in out or "1.0" in out or "between" in out.lower()
+        err = capsys.readouterr().err
+        assert "0.0" in err or "1.0" in err or "between" in err.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +484,80 @@ class TestMissingProcessId:
         assert result is None
         err = capsys.readouterr().err
         assert "process_id" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Malformed JSON in submit response (200 OK + invalid body)
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedSubmitJson:
+    """A 200 response whose body is not valid JSON must be caught, not raised."""
+
+    @patch("scripts.generate_image.time.sleep")
+    def test_malformed_submit_json_returns_none(
+        self,
+        mock_sleep: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        inp = _make_input_png(tmp_path)
+        monkeypatch.setenv("TOPAZ_API_KEY", "test-key")
+
+        bad_resp = _mock_response(text="<html>500 internal error</html>")
+        bad_resp.json.side_effect = ValueError("invalid JSON")
+        post_mock = MagicMock(return_value=bad_resp)
+
+        with patch("scripts.generate_image.requests.post", post_mock):
+            from scripts.generate_image import topaz_enhance_image
+
+            result = topaz_enhance_image(inp)
+
+        assert result is None
+        err = capsys.readouterr().err
+        assert "topaz" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Malformed JSON in download-URL response
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedDownloadJson:
+    """A 200 download-URL response whose body is not valid JSON must be caught."""
+
+    @patch("scripts.generate_image.time.sleep")
+    def test_malformed_download_url_json_returns_none(
+        self,
+        mock_sleep: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        inp = _make_input_png(tmp_path)
+        out_path = tmp_path / "out.png"
+        monkeypatch.setenv("TOPAZ_API_KEY", "test-key")
+
+        post_mock = MagicMock(
+            return_value=_mock_response(json_data={"process_id": "job-bad-dl"})
+        )
+        status_resp = _mock_response(json_data={"status": "Completed"})
+        dl_url_resp = _mock_response(text="not json at all")
+        dl_url_resp.json.side_effect = ValueError("invalid JSON")
+        get_mock = MagicMock(side_effect=[status_resp, dl_url_resp])
+
+        with (
+            patch("scripts.generate_image.requests.post", post_mock),
+            patch("scripts.generate_image.requests.get", get_mock),
+        ):
+            from scripts.generate_image import topaz_enhance_image
+
+            result = topaz_enhance_image(inp, output_path=out_path)
+
+        assert result is None
+        err = capsys.readouterr().err
+        assert "topaz" in err.lower()
 
 
 # ---------------------------------------------------------------------------

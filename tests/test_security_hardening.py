@@ -184,6 +184,20 @@ class TestDocumentImagePromptTableEscaping:
         # Exactly one row, single-cell content collapsed to one space.
         assert "line1 line2" in table_row
 
+    def test_crlf_in_prompt_collapsed_to_single_space(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Guard against the chained .replace("\r", " ").replace("\n", " ")
+        # pattern: that turns a single CRLF into TWO spaces, not one.
+        body = _run_document_prompt(tmp_path, monkeypatch, prompt="line1\r\nline2")
+        table_row = next(
+            line
+            for line in body.splitlines()
+            if "line1" in line and line.startswith("|")
+        )
+        assert "line1 line2" in table_row
+        assert "line1  line2" not in table_row
+
     def test_backslash_before_pipe_order_is_load_bearing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
