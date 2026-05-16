@@ -109,8 +109,10 @@ class TestRequestsUnavailable:
             mod.REQUESTS_AVAILABLE = original
 
         assert result is None
-        out = capsys.readouterr().out
-        assert "requests" in out.lower()
+        # The "requests not available" message was migrated from stdout to
+        # stderr alongside the size-limit error paths.
+        err = capsys.readouterr().err
+        assert "requests" in err.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +157,10 @@ class TestInputPathMissing:
         result = topaz_enhance_image(missing)
 
         assert result is None
-        out = capsys.readouterr().out
-        assert "not found" in out.lower() or "error" in out.lower()
+        # Missing-input message now goes via the FileNotFoundError branch
+        # in stat(), which prints to stderr alongside the size-limit error.
+        err = capsys.readouterr().err
+        assert "not found" in err.lower() or "error" in err.lower()
 
 
 # ---------------------------------------------------------------------------

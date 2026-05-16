@@ -682,7 +682,13 @@ class TestGenerateImageSuccess:
 
         assert result is not None
         assert result.exists()
-        assert "generated_" in result.name or result.name.startswith("generated")
+        # Filename must follow generated_<timestamp>_<8 hex>.<ext>; a regression
+        # that drops the secrets.token_hex(4) suffix would fail this regex.
+        import re
+
+        assert re.match(r"^generated_\d{8}_\d{6}_[0-9a-f]{32}\.\w+$", result.name), (
+            result.name
+        )
 
 
 class TestGenerateImageEmptyCandidates:
@@ -919,7 +925,14 @@ class TestGenerateImageDraftMode:
             )
 
         assert result is not None
-        assert "draft" in str(result).lower()
+        # Filename must follow draft_<timestamp>_<8 hex>.<ext>; assert the
+        # parent dir is the drafts/ tree and the file itself carries the token.
+        assert result.parent.name == "drafts"
+        import re
+
+        assert re.match(r"^draft_\d{8}_\d{6}_[0-9a-f]{32}\.\w+$", result.name), (
+            result.name
+        )
 
 
 def _patch_pro_model_types() -> tuple[Any, Any]:
