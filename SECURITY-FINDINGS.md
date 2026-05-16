@@ -108,7 +108,8 @@ out explicitly below rather than skipped silently.
   malformed entry can corrupt downstream tooling. Fix:
   - Table cell: escape `\` and `|`, strip newlines.
   - Detailed entry: render the prompt as an **indented code block**
-    (4-space prefix per line), which is invulnerable to in-prompt
+    (6-space prefix per line: 2 spaces for list continuation plus 4
+    spaces for the code block), which is invulnerable to in-prompt
     backtick fences.
 - **2.2.5 Topaz download URL allow-list** &mdash; Already present at
   `scripts/generate_image.py:393`. The script restricts the download
@@ -194,7 +195,14 @@ Declared runtime dependencies:
 
 Both are bounded by upper version ceilings. `docs/known-vulnerabilities.md`
 records a clean `pip-audit` as of 2026-04-18 with the next review due
-2026-06-17. No CVEs were identified during this review.
+2026-06-17.
+
+Transitive dependency updates applied in this PR:
+
+- `urllib3` 2.6.3 &rarr; 2.7.0 to clear two CVEs disclosed against the
+  prior pin: CVE-2026-44431 and CVE-2026-44432. The bump is reflected
+  in `uv.lock`; see `docs/known-vulnerabilities.md` for the closed-CVE
+  record.
 
 ## 3. Summary of changes in this PR
 
@@ -217,9 +225,16 @@ Workflows:
 - `.github/workflows/fips-compatibility.yml`: add a `harden-runner`
   step and `persist-credentials: false` on checkout.
 
+Dependencies:
+
+- `urllib3` 2.6.3 &rarr; 2.7.0 to close CVE-2026-44431 and
+  CVE-2026-44432. The pin lives in `uv.lock`; see
+  `docs/known-vulnerabilities.md` for the closed-CVE record.
+
 Documentation:
 
 - This file (`SECURITY-FINDINGS.md`).
 
-Test status: 125/125 existing tests pass (`uv run pytest tests/`).
+Test status: 139/139 tests pass with 90.69% coverage
+(`uv run --frozen --extra dev pytest tests/`).
 `uv run ruff check scripts/` reports no issues.
