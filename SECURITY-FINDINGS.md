@@ -141,7 +141,6 @@ add `permissions:` blocks, add `step-security/harden-runner` with
 | `ci.yml` | yes | yes | yes (gate job) |
 | `codeql.yml` | yes | yes | yes |
 | `coverage.yml` | **partial &mdash; @main** | yes | (delegated) |
-| `fips-compatibility.yml` | yes | yes | **added by this PR** |
 | `pr-validation.yml` | yes | yes | yes |
 | `python-compatibility.yml` | yes (SHA) | yes | (delegated) |
 | `repo-health.yml` | n/a (no `uses:`) | **added by this PR** | **added by this PR** |
@@ -155,9 +154,6 @@ Fixes applied in this PR:
 - **`repo-health.yml`**: added top-level `permissions: contents: read`,
   a job-level `permissions: contents: read`, and a `harden-runner` step
   with `egress-policy: audit`.
-- **`fips-compatibility.yml`**: added a `harden-runner` step as the
-  first step of the `fips-check` job, and added
-  `persist-credentials: false` to the existing checkout.
 
 Resolved in a follow-up commit on this branch:
 
@@ -165,12 +161,21 @@ Resolved in a follow-up commit on this branch:
   ref). Now pinned to commit SHA
   `732c0e313c250b7702d1a9ba75bfc4edb07dd830` of
   `ByronWilliamsCPA/.github`. Renovate will surface upstream updates.
-- **`fips-compatibility.yml` and `repo-health.yml` `harden-runner`**:
+- **`repo-health.yml` `harden-runner`**:
   initially introduced at v2.10.1 to match `codeql.yml` /
   `security-analysis.yml` / `pr-validation.yml`. Now upgraded to v2.19.1
   (`a5ad31d6a139d249332a2605b85202e8c0b78450`) to match `ci.yml` and
   `reuse.yml`, eliminating the within-repo version skew. The same upgrade
   should be applied to the other three callers in a separate PR.
+
+Subsequent change (recorded for posterity):
+
+- **`fips-compatibility.yml` was removed entirely in PR #29** (commit
+  `d6752fd`) after WF-16 deployment surfaced repeated `FileNotFoundError`
+  failures: this repo does not contain `scripts/check_fips_compatibility.py`
+  and is therefore out of scope for the WF-16 FIPS check policy. Any
+  hardening guidance that previously targeted that workflow no longer
+  applies here.
 
 Outstanding (recommend follow-up, not auto-applied):
 
@@ -183,8 +188,8 @@ Outstanding (recommend follow-up, not auto-applied):
 
 - **`harden-runner` egress policy is `audit` (log-only)**: blocking mode
   requires curating an explicit allow-list per workflow. Suggested
-  follow-up: enumerate egress destinations for the FIPS and repo-health
-  jobs and switch them to `block`.
+  follow-up: enumerate egress destinations for the repo-health job and
+  switch it to `block`.
 
 ### 2.5 Dependency surface
 
@@ -197,12 +202,17 @@ Both are bounded by upper version ceilings. `docs/known-vulnerabilities.md`
 records a clean `pip-audit` as of 2026-04-18 with the next review due
 2026-06-17.
 
-Transitive dependency updates applied in this PR:
+Transitive dependency update relevant to this review:
 
 - `urllib3` 2.6.3 &rarr; 2.7.0 to clear two CVEs disclosed against the
-  prior pin: CVE-2026-44431 and CVE-2026-44432. The bump is reflected
-  in `uv.lock`; see `docs/known-vulnerabilities.md` for the closed-CVE
-  record.
+  prior pin: CVE-2026-44431 (cross-origin sensitive-header forwarding in
+  proxied low-level redirects; affects 1.23..&lt;2.7.0) and CVE-2026-44432
+  (decompression-bomb safeguards bypassed on parts of the streaming API;
+  affects 2.6.0..&lt;2.7.0). The pin and `uv.lock` regeneration were
+  applied in **PR #24** (commit `8a9d79c`), which added an explicit
+  `urllib3>=2.7.0,<3.0.0` entry to `[project].dependencies`; recorded
+  here for the security posture record. See
+  `docs/known-vulnerabilities.md` for the closed-CVE entry.
 
 ## 3. Summary of changes in this PR
 
@@ -222,19 +232,18 @@ Workflows:
 
 - `.github/workflows/repo-health.yml`: add `permissions:` blocks and a
   `harden-runner` step.
-- `.github/workflows/fips-compatibility.yml`: add a `harden-runner`
-  step and `persist-credentials: false` on checkout.
 
-Dependencies:
+Dependencies (applied in PR #24, recorded here):
 
-- `urllib3` 2.6.3 &rarr; 2.7.0 to close CVE-2026-44431 and
-  CVE-2026-44432. The pin lives in `uv.lock`; see
-  `docs/known-vulnerabilities.md` for the closed-CVE record.
+- `urllib3` pinned to `>=2.7.0,<3.0.0` in `pyproject.toml`; `uv.lock`
+  regenerated (`urllib3` 2.6.3 &rarr; 2.7.0) to close CVE-2026-44431 and
+  CVE-2026-44432. See `docs/known-vulnerabilities.md` for the closed-CVE
+  entry.
 
 Documentation:
 
 - This file (`SECURITY-FINDINGS.md`).
 
-Test status: 139/139 tests pass with 90.69% coverage
+Test status: 149/149 tests pass with 90.50% coverage
 (`uv run --frozen --extra dev pytest tests/`).
 `uv run ruff check scripts/` reports no issues.

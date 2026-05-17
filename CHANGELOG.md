@@ -82,6 +82,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All diagnostic `print()` calls in `get_topaz_api_key` redirected to
   `sys.stderr`.
 - `.env` file read in `_load_api_key` wrapped in `try/except OSError`.
+- `topaz_enhance_image` validation `print()` calls (unknown-model,
+  invalid `output_format`, strength out-of-range) routed to `sys.stderr`
+  so wrapper scripts capturing only stdout are not confused by error
+  text mixed into data output.
+- Malformed-JSON responses from the Topaz submit and download-URL
+  endpoints (200 status, non-JSON body) are now caught: `resp.json()`
+  and `dl_resp.json()` moved inside the existing `try/except
+  (RequestException, ValueError)` blocks, and the parsed payloads are
+  guarded with `isinstance(payload, dict)` so a non-object top-level
+  JSON value (array, scalar, `null`) raises a clean error instead of an
+  uncaught `AttributeError` from `.get(...)`. The status-poll path
+  received the same `isinstance` guard for consistency.
+- Malformed-JSON error messages now include the HTTP status code and a
+  200-character body snippet so operators can distinguish a transport
+  failure from a non-JSON 200 response without reading the live wire.
+- `KeyError` removed from four Topaz `requests` `except` tuples
+  (submit, status-poll, download URL, image download). No protected
+  `try` body did a dict subscript that could raise `KeyError`; the
+  catch was dead defensive code with no test exercising it.
+- CRLF and other consecutive newline runs in prompts collapsed to a
+  single space via `re.sub(r"[\r\n]+", " ", ...)` in
+  `document_image_prompt`. Replaces the chained
+  `.replace("\r", " ").replace("\n", " ")` that turned a single CRLF
+  into two spaces in the generated `PROMPTS.md` table cell.
 
 ### Security
 
