@@ -883,6 +883,15 @@ def generate_image(
         "response_modalities": ["IMAGE", "TEXT"],
     }
 
+    # Warn when aspect/size are passed to a model that cannot honor them
+    # (e.g. legacy 'flash'). Without this, argparse's union choices accept the
+    # value but the API call silently drops it.
+    if not model_config.get("supports_image_config") and (aspect_ratio or image_size):
+        print(
+            f"Warning: {model_config['name']} does not support --aspect or --size;"
+            f" these flags will be ignored. Use --model flash-2 or pro for image_config control."
+        )
+
     # Add image config for models that support it (pro, flash-2)
     if model_config.get("supports_image_config"):
         model_aspects = model_config.get("aspect_ratios", [])

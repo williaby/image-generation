@@ -2843,3 +2843,213 @@ class TestMain:
 
         assert exc_info.value.code == 0
         assert mock_enhance.called
+
+
+# ---------------------------------------------------------------------------
+# Per-model aspect_ratios / image_sizes validation (new in flash-2)
+# ---------------------------------------------------------------------------
+
+
+class TestPerModelAspectRatioValidation:
+    """Aspect ratios valid for one model can be invalid for another."""
+
+    def test_flash2_accepts_21_9_that_pro_rejects(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """21:9 is in flash-2's aspect_ratios but not pro's; flash-2 must not warn."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="ultra-wide",
+                model_key="flash-2",
+                output_path=tmp_path / "output" / "ultra.png",
+                aspect_ratio="21:9",
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "not supported" not in out.lower()
+        assert "21:9" in out
+
+    def test_pro_rejects_21_9_with_warning_naming_the_model(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """21:9 on pro emits a warning that names the active model."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="pro rejects 21:9",
+                model_key="pro",
+                output_path=tmp_path / "output" / "pro21.png",
+                aspect_ratio="21:9",
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "warning" in out.lower()
+        assert "21:9" in out
+        assert "pro" in out.lower()
+
+    def test_flash_warns_when_aspect_or_size_supplied(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Legacy flash silently dropped --aspect/--size before; now warns."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="flash dropped aspect",
+                model_key="flash",
+                output_path=tmp_path / "output" / "flash_warn.png",
+                aspect_ratio="16:9",
+                image_size="2K",
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "does not support" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# --thinking flag -> types.ThinkingConfig wiring (flash-2 only)
+# ---------------------------------------------------------------------------
+
+
+class TestThinkingLevelFlag:
+    def test_flash2_sets_thinking_config_in_generate_content_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """thinking_level='high' on flash-2 reaches the SDK via ThinkingConfig."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            mod.generate_image(
+                prompt="thinking high",
+                model_key="flash-2",
+                output_path=tmp_path / "output" / "tc.png",
+                thinking_level="high",
+                document_prompt=False,
+            )
+
+        call_kwargs = mock_client_instance.models.generate_content.call_args.kwargs
+        config = call_kwargs["config"]
+        assert config.thinking_config is not None
+        # google-genai normalizes 'high' -> ThinkingLevel.HIGH; str contains 'HIGH'.
+        assert "HIGH" in str(config.thinking_config.thinking_level).upper()
+
+    def test_thinking_on_pro_warns_and_omits_thinking_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Pro does not expose thinking_level; the flag warns and is dropped."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            mod.generate_image(
+                prompt="thinking on pro is a no-op",
+                model_key="pro",
+                output_path=tmp_path / "output" / "pro_tc.png",
+                thinking_level="high",
+                document_prompt=False,
+            )
+
+        out = capsys.readouterr().out
+        assert "no effect" in out.lower() or "warning" in out.lower()
+        config = mock_client_instance.models.generate_content.call_args.kwargs["config"]
+        assert config.thinking_config is None
