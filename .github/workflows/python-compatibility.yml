@@ -12,6 +12,7 @@ on:
       - 'tests/**/*.py'
       - 'pyproject.toml'
       - 'uv.lock'
+      - '.github/workflows/python-compatibility.yml'
   pull_request:
     branches: [main, master, develop]
     paths:
@@ -19,6 +20,7 @@ on:
       - 'tests/**/*.py'
       - 'pyproject.toml'
       - 'uv.lock'
+      - '.github/workflows/python-compatibility.yml'
   schedule:
     # Weekly compatibility check on Sundays at 6 AM UTC
     - cron: '0 6 * * 0'
