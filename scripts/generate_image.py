@@ -359,17 +359,44 @@ def topaz_enhance_image(
             )
         resp.raise_for_status()
         submit_payload = resp.json()
-    except (requests.RequestException, ValueError, KeyError) as e:
-        print(f"Error submitting Topaz job: {e}", file=sys.stderr)
+    except requests.RequestException as e:
+        print(f"Error submitting Topaz job (transport): {e}", file=sys.stderr)
+        return None
+    except ValueError as e:
+        # `resp.json()` raised on a 200-or-redirected response whose body is
+        # not valid JSON. `resp` is guaranteed bound here because
+        # `raise_for_status()` ran first, so include the status and body
+        # snippet to disambiguate "Topaz returned HTML error page with 200
+        # status" from "Topaz returned a transient parse failure".
+        print(
+            f"Error: Topaz submit returned non-JSON body "
+            f"(status={resp.status_code}): {e}; "
+            f"body[:200]={resp.text[:200]!r}",
+            file=sys.stderr,
+        )
         return None
     except OSError as e:
         print(f"Error reading Topaz input file: {e}", file=sys.stderr)
         return None
 
+    if not isinstance(submit_payload, dict):
+        # Defend against a top-level JSON value that is not a JSON object
+        # (array, scalar, `null`); `.get(...)` would raise `AttributeError`
+        # which is not in any catch clause above.
+        print(
+            f"Error: Topaz submit response was not a JSON object "
+            f"(got {type(submit_payload).__name__}): "
+            f"body[:200]={resp.text[:200]!r}",
+            file=sys.stderr,
+        )
+        return None
+
     process_id = submit_payload.get("process_id")
     if not process_id:
         print(
-            f"Error: Topaz API returned unexpected response (missing process_id): {resp.text[:200]}",
+            f"Error: Topaz API returned unexpected response "
+            f"(missing process_id, keys={sorted(submit_payload)[:10]}): "
+            f"{resp.text[:200]}",
             file=sys.stderr,
         )
         return None
@@ -393,20 +420,29 @@ def topaz_enhance_image(
                 wait = min(wait * 2, 30)
                 continue
             status_resp.raise_for_status()
-            status = status_resp.json().get("status", "")
-            if verbose:
-                print(f"  Status: {status}")
-            if status == "Completed":
-                break
-            if status in ("Failed", "Error"):
-                print(
-                    f"Error: Topaz job {process_id} failed (status: {status})",
-                    file=sys.stderr,
-                )
-                return None
-        except (requests.RequestException, ValueError, KeyError) as e:
+            status_payload = status_resp.json()
+        except (requests.RequestException, ValueError) as e:
             print(
-                f"Error polling Topaz status for job {process_id}: {e}", file=sys.stderr
+                f"Error polling Topaz status for job {process_id}: {e}",
+                file=sys.stderr,
+            )
+            return None
+        if not isinstance(status_payload, dict):
+            print(
+                f"Error: Topaz status response for job {process_id} was "
+                f"not a JSON object (got {type(status_payload).__name__})",
+                file=sys.stderr,
+            )
+            return None
+        status = status_payload.get("status", "")
+        if verbose:
+            print(f"  Status: {status}")
+        if status == "Completed":
+            break
+        if status in ("Failed", "Error"):
+            print(
+                f"Error: Topaz job {process_id} failed (status: {status})",
+                file=sys.stderr,
             )
             return None
         wait = min(wait * 1.5, 15)
@@ -426,9 +462,26 @@ def topaz_enhance_image(
         )
         dl_resp.raise_for_status()
         dl_payload = dl_resp.json()
-    except (requests.RequestException, ValueError, KeyError) as e:
+    except requests.RequestException as e:
         print(
-            f"Error getting Topaz download URL for job {process_id}: {e}",
+            f"Error getting Topaz download URL for job {process_id} (transport): {e}",
+            file=sys.stderr,
+        )
+        return None
+    except ValueError as e:
+        print(
+            f"Error: Topaz download URL response was non-JSON for job "
+            f"{process_id} (status={dl_resp.status_code}): {e}; "
+            f"body[:200]={dl_resp.text[:200]!r}",
+            file=sys.stderr,
+        )
+        return None
+
+    if not isinstance(dl_payload, dict):
+        print(
+            f"Error: Topaz download URL response for job {process_id} was "
+            f"not a JSON object (got {type(dl_payload).__name__}): "
+            f"body[:200]={dl_resp.text[:200]!r}",
             file=sys.stderr,
         )
         return None
@@ -456,9 +509,10 @@ def topaz_enhance_image(
         img_resp = requests.get(download_url, timeout=120, allow_redirects=False)
         img_resp.raise_for_status()
         image_data = img_resp.content
-    except (requests.RequestException, ValueError, KeyError) as e:
+    except requests.RequestException as e:
         print(
-            f"Error downloading Topaz result for job {process_id}: {e}", file=sys.stderr
+            f"Error downloading Topaz result for job {process_id}: {e}",
+            file=sys.stderr,
         )
         return None
 
