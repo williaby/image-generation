@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `google-genai` dependency upgraded from `>=0.4.0,<2.0.0` (resolved at
+  `0.8.0`) to `>=2.2.0,<2.3.0`. Pin updated in `pyproject.toml`,
+  `requirements.txt`, and `uv.lock` so all three manifests agree. Upstream
+  v2.0 release notes scope breaking changes to the Interactions API, which
+  this project does not use. The `client.models.generate_content` codepath
+  in `scripts/generate_image.py` was verified against v2.2.0's
+  `types.GenerateContentResponse`, `types.GenerateContentConfig`, and
+  `types.Part` schemas; all attributes the script reads (`candidates`,
+  `prompt_feedback`, `usage_metadata`, `text`, `inline_data`,
+  `thought_signature`) remain present unchanged. Satisfies the `#VERIFY`
+  marker at `scripts/generate_image.py:823` for google-genai version bumps.
 - `python-compatibility.yml` `paths:` filters and `source-directory:` aligned
   from `src/` to `scripts/` to match this repo's actual layout. The previous
   `src/` references were a copy-paste leftover from the org template; no
