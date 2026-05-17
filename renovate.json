@@ -43,6 +43,12 @@
       "pinDigests": true
     },
     {
+      "description": "Group Python dependency bumps across pep621 (pyproject.toml) and pip_requirements (requirements.txt) so a single package update produces one PR that touches both manifests. Templated groupName means cross-manager bumps for the SAME package merge into one PR, while different packages still get their own PRs. Prevents the version-skew pattern seen in PR #26, where google-genai was bumped in requirements.txt only and pyproject.toml retained the prior constraint.",
+      "matchManagers": ["pep621", "pip_requirements"],
+      "groupName": "Python dep {{depName}}",
+      "commitMessageTopic": "Python dependency {{depName}}"
+    },
+    {
       "description": "Disable automated Python version (requires-python) updates; bump manually when ready",
       "matchDepTypes": ["requires-python"],
       "enabled": false,

@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `renovate.json` `packageRules` extended with a cross-manager grouping entry
+  for `pep621` and `pip_requirements`. Single-package Python bumps now
+  produce one PR that updates both `pyproject.toml` and `requirements.txt`
+  in lockstep (`groupName: "Python dep {{depName}}"` templates per-package
+  so different dependencies still get separate PRs). Prevents the
+  version-skew pattern that surfaced in PR #26, where `google-genai` was
+  bumped in `requirements.txt` only and `pyproject.toml` retained the prior
+  constraint, causing `uv sync` (used by every CI workflow) to silently
+  resolve the old version.
 - `google-genai` dependency upgraded from `>=0.4.0,<2.0.0` (resolved at
   `0.8.0`) to `>=2.2.0,<2.3.0`. Pin updated in `pyproject.toml`,
   `requirements.txt`, and `uv.lock` so all three manifests agree. Upstream
@@ -62,6 +71,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Python compatibility matrix `test-command` in
+  `.github/workflows/python-compatibility.yml` simplified from
+  `pytest tests/ -v --tb=short -x --ignore=tests/integration --ignore=tests/load -m "not slow and not integration"`
+  to `pytest tests/ -v --tb=short -x`. The org reusable workflow
+  (`ByronWilliamsCPA/.github` `python-compatibility.yml@de201234`,
+  introduced by PR #25) re-executes `test-command` through a shell layer
+  that strips inner double quotes, so pytest received `-m not` and
+  treated `slow` as a positional path argument, failing all six matrix
+  cells (Python 3.12/3.13 x ubuntu/macos/windows) with exit code 4 since
+  commit `d11c726`. The removed filter and ignores were dead boilerplate
+  for this repo (no `slow` or `integration` markers exist; no
+  `tests/integration/` or `tests/load/` directories). Same workflow file
+  now also triggers on its own path so workflow-only edits get validated
+  by CI. Restore the filter only after the org workflow properly quotes
+  `inputs.test-command` AND this repo introduces those markers. (PR #33)
 - Coverage gate raised from 60% to 80% to match CLAUDE.md graduated coverage
   requirement.
 - Pre-commit em-dash hook `types_or` filter removed; the filter was ANDed with
