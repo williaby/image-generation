@@ -46,7 +46,15 @@ jobs:
       include-macos: true
       include-windows: true
       source-directory: 'scripts'
-      test-command: 'pytest tests/ -v --tb=short -x --ignore=tests/integration --ignore=tests/load -m "not slow and not integration"'
+      # NOTE: removed the trailing `--ignore=tests/integration --ignore=tests/load -m "not slow and not integration"`
+      # on 2026-05-17. The org reusable workflow at python-compatibility.yml@de201234
+      # (introduced by PR #25) re-executes test-command through a shell layer that
+      # strips inner double quotes, so pytest received `-m not` then treated `slow`
+      # as a positional path and exited with code 4. This project has no `slow` or
+      # `integration` markers and no tests/integration/ or tests/load/ directories,
+      # so the filter and ignores were dead boilerplate. Re-add only after the org
+      # workflow quoting is fixed AND this repo introduces those markers.
+      test-command: 'pytest tests/ -v --tb=short -x'
       coverage-report: false
       fail-fast: false
       timeout-minutes: 30
