@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `renovate.json` `packageRules` extended with a cross-manager grouping entry
+  for `pep621` and `pip_requirements`. Single-package Python bumps now
+  produce one PR that updates both `pyproject.toml` and `requirements.txt`
+  in lockstep (`groupName: "Python dep {{depName}}"` templates per-package
+  so different dependencies still get separate PRs). Prevents the
+  version-skew pattern that surfaced in PR #26, where `google-genai` was
+  bumped in `requirements.txt` only and `pyproject.toml` retained the prior
+  constraint, causing `uv sync` (used by every CI workflow) to silently
+  resolve the old version.
 - `google-genai` dependency upgraded from `>=0.4.0,<2.0.0` (resolved at
   `0.8.0`) to `>=2.2.0,<2.3.0`. Pin updated in `pyproject.toml`,
   `requirements.txt`, and `uv.lock` so all three manifests agree. Upstream
