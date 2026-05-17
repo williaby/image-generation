@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GitHub Actions minor/patch bumps, SHA pinning for actions, and manual
   review gating for Python version updates.
 
+### Changed
+
+- `python-compatibility.yml` `paths:` filters and `source-directory:` aligned
+  from `src/` to `scripts/` to match this repo's actual layout. The previous
+  `src/` references were a copy-paste leftover from the org template; no
+  `src/` directory exists in this repo, so the workflow's path-trigger never
+  fired on Python changes.
+- `python-compatibility.yml` matrix trimmed from
+  `["3.10", "3.11", "3.12", "3.13"]` to `["3.12", "3.13"]` to match
+  `requires-python = ">=3.12"` in `pyproject.toml`. The earlier 3.10/3.11
+  cells could not produce meaningful test results under the declared
+  support range.
+
 ### Removed
 
 - `.github/workflows/fips-compatibility.yml` removed. This repo has no
@@ -69,19 +82,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All diagnostic `print()` calls in `get_topaz_api_key` redirected to
   `sys.stderr`.
 - `.env` file read in `_load_api_key` wrapped in `try/except OSError`.
-
-### Changed
-
-- `python-compatibility.yml` `paths:` filters and `source-directory:` aligned
-  from `src/` to `scripts/` to match this repo's actual layout. The previous
-  `src/` references were a copy-paste leftover from the org template; no
-  `src/` directory exists in this repo, so the workflow's path-trigger never
-  fired on Python changes.
-- `python-compatibility.yml` matrix trimmed from
-  `["3.10", "3.11", "3.12", "3.13"]` to `["3.12", "3.13"]` to match
-  `requires-python = ">=3.12"` in `pyproject.toml`. The earlier 3.10/3.11
-  cells could not produce meaningful test results under the declared
-  support range.
 
 ### Security
 
