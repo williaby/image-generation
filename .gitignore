@@ -75,9 +75,16 @@ Thumbs.db
 *.tmp
 *.temp
 
-# Qlty code quality tool
-.qlty/
+# Qlty code quality tool (track config only)
+.qlty/*
+!.qlty/qlty.toml
 
-# Local Claude Code configuration (project-specific, not for version control)
-.claude/
-CLAUDE.md
+# AI assistant state (track CLAUDE.md and settings.json; catch-all with
+# negation is safer than enumeration; mirrors ~/dev/.github/.gitignore template)
+.claude/*
+!.claude/CLAUDE.md
+!.claude/settings.json
+
+# Worktrees and compliance report artifacts
+.worktrees/
+docs/compliance-reports/
