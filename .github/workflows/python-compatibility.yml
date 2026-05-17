@@ -8,14 +8,14 @@ on:
   push:
     branches: [main, master]
     paths:
-      - 'src/**/*.py'
+      - 'scripts/**/*.py'
       - 'tests/**/*.py'
       - 'pyproject.toml'
       - 'uv.lock'
   pull_request:
     branches: [main, master, develop]
     paths:
-      - 'src/**/*.py'
+      - 'scripts/**/*.py'
       - 'tests/**/*.py'
       - 'pyproject.toml'
       - 'uv.lock'
@@ -37,11 +37,15 @@ jobs:
     name: Python Compatibility Matrix
     uses: ByronWilliamsCPA/.github/.github/workflows/python-compatibility.yml@de201234d10d1e0705e259e57e9d63e87a6ae0ac  # main
     with:
-      python-versions: '["3.10", "3.11", "3.12", "3.13"]'
+      # Matrix kept in lockstep with pyproject.toml `requires-python = ">=3.12"`.
+      # 3.10/3.11 were removed because pip refuses installs on those versions
+      # under the current requires-python, making those cells either red or
+      # silently mis-resolved to a newer interpreter.
+      python-versions: '["3.12", "3.13"]'
       operating-systems: '["ubuntu-latest"]'
       include-macos: true
       include-windows: true
-      source-directory: 'src'
+      source-directory: 'scripts'
       test-command: 'pytest tests/ -v --tb=short -x --ignore=tests/integration --ignore=tests/load -m "not slow and not integration"'
       coverage-report: false
       fail-fast: false
