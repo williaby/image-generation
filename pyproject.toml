@@ -65,6 +65,7 @@ ignore = [
     "E501",                    # line-length (handled by ruff format)
     "ANN101", "ANN102",        # legacy self/cls annotations
     "TRY003",                  # long exception messages allowed
+    "ISC001",                  # conflicts with ruff format (per ruff docs)
 ]
 
 [tool.ruff.lint.per-file-ignores]
