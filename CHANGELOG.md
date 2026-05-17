@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GitHub Actions minor/patch bumps, SHA pinning for actions, and manual
   review gating for Python version updates.
 
+### Removed
+
+- `.github/workflows/fips-compatibility.yml` removed. This repo has no
+  FIPS components: no federal, HIPAA, or financial services deployment
+  target; no custom cryptography in code (HTTPS via `requests` ->
+  `urllib3` -> OpenSSL is the only crypto-adjacent surface, and FIPS
+  posture there is governed by the deployment host's OpenSSL build,
+  not by application code). The workflow referenced
+  `scripts/check_fips_compatibility.py`, which this repo never
+  contained, so every run failed with `FileNotFoundError`. Part of the
+  WF-16 10-repo cleanup sweep; canonical template hardened separately
+  so future deployments self-skip when the script is absent.
+
 ### Fixed
 
 - Coverage gate raised from 60% to 80% to match CLAUDE.md graduated coverage
