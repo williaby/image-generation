@@ -64,7 +64,4 @@ default = true
 name = "ruff"
 
 [[plugin]]
-name = "basedpyright"
-
-[[plugin]]
 name = "bandit"
