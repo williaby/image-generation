@@ -13,9 +13,13 @@ after the urllib3 update below.
 
 ## Resolved vulnerabilities
 
-- 2026-05-15: bumped urllib3 2.6.3 -> 2.7.0 to clear CVE-2026-44431 and
-  CVE-2026-44432 (transitive dependency via `requests`). Surfaced by the
-  SBOM workflow during PR #17.
+- 2026-05-15: bumped urllib3 2.6.3 -> 2.7.0 to clear CVE-2026-44431
+  (cross-origin sensitive-header forwarding in proxied low-level
+  redirects) and CVE-2026-44432 (decompression-bomb safeguards bypassed
+  on parts of the streaming API). Transitive dependency via `requests`.
+  Surfaced by the SBOM workflow during PR #17; pin
+  (`urllib3>=2.7.0,<3.0.0`) and `uv.lock` regeneration applied in
+  PR #24, commit `8a9d79c`.
 
 ## Review schedule
 
