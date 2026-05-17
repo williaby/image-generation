@@ -134,6 +134,13 @@ skips = ["B101"]  # assert statements are fine in tests
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Project root on sys.path so `from scripts.generate_image import ...` works
+# under bare `pytest` (the org python-compatibility workflow runs
+# `uv run pytest` which, unlike `python -m pytest`, does not auto-add CWD to
+# sys.path) and when no editable install exists (this project has no
+# [build-system], and the workflow runs `uv sync --no-build`, so the project
+# is never installed into the test venv).
+pythonpath = ["."]
 addopts = "--cov=scripts --cov-report=term-missing --cov-branch"
 
 [tool.coverage.run]
