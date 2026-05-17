@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Gemini and Topaz Labs image generation and enhancement tools"
 requires-python = ">=3.12"
 dependencies = [
-    "google-genai>=0.4.0,<2.0.0",
+    "google-genai>=2.2.0,<2.3.0",
     "requests>=2.32.0,<3.0.0",
     # Pinned to address CVE-2026-44431 (sensitive header leak on proxied
     # low-level redirects) and CVE-2026-44432 (decompression-bomb safeguard
