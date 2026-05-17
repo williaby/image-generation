@@ -494,10 +494,8 @@ class TestMissingProcessId:
 class TestMalformedSubmitJson:
     """A 200 response whose body is not valid JSON must be caught, not raised."""
 
-    @patch("scripts.generate_image.time.sleep")
     def test_malformed_submit_json_returns_none(
         self,
-        mock_sleep: MagicMock,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
@@ -505,6 +503,12 @@ class TestMalformedSubmitJson:
         inp = _make_input_png(tmp_path)
         monkeypatch.setenv("TOPAZ_API_KEY", "test-key")
 
+        # 200 OK with HTML body, simulating a misconfigured upstream that
+        # returns an error page with the wrong content-type. `bad_resp.json`
+        # raises ValueError; `raise_for_status` is a no-op (status_code 200
+        # from `_mock_response` default) so the code path that gets
+        # exercised is the new `submit_payload = resp.json()` inside the
+        # narrowed try block.
         bad_resp = _mock_response(text="<html>500 internal error</html>")
         bad_resp.json.side_effect = ValueError("invalid JSON")
         post_mock = MagicMock(return_value=bad_resp)
@@ -515,8 +519,58 @@ class TestMalformedSubmitJson:
             result = topaz_enhance_image(inp)
 
         assert result is None
+        # `time.sleep` is unreachable on submit failure (we return before
+        # entering the polling loop), so no patch of `time.sleep` is needed.
         err = capsys.readouterr().err
-        assert "topaz" in err.lower()
+        # Lock to the specific error path: the submit branch's enriched
+        # diagnostic. A vague "topaz" substring also appears in the
+        # polling-timeout message; tighter check prevents wrong-path passes.
+        assert "Topaz submit" in err
+        assert "non-JSON" in err
+        assert "status=200" in err
+
+
+# ---------------------------------------------------------------------------
+# Malformed JSON in status-polling response
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedStatusJson:
+    """A 200 status-poll response whose body is not valid JSON must be caught."""
+
+    @patch("scripts.generate_image.time.sleep")
+    def test_malformed_status_json_returns_none(
+        self,
+        mock_sleep: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        inp = _make_input_png(tmp_path)
+        out_path = tmp_path / "out.png"
+        monkeypatch.setenv("TOPAZ_API_KEY", "test-key")
+
+        post_mock = MagicMock(
+            return_value=_mock_response(json_data={"process_id": "job-bad-status"})
+        )
+        # The first (and only) GET hits the status endpoint; `.json()` raises
+        # ValueError, so the polling except clause should fire and return None.
+        bad_status_resp = _mock_response(text="<html>upstream blip</html>")
+        bad_status_resp.json.side_effect = ValueError("invalid JSON")
+        get_mock = MagicMock(return_value=bad_status_resp)
+
+        with (
+            patch("scripts.generate_image.requests.post", post_mock),
+            patch("scripts.generate_image.requests.get", get_mock),
+        ):
+            from scripts.generate_image import topaz_enhance_image
+
+            result = topaz_enhance_image(inp, output_path=out_path)
+
+        assert result is None
+        err = capsys.readouterr().err
+        assert "polling Topaz status" in err
+        assert "job-bad-status" in err
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +596,12 @@ class TestMalformedDownloadJson:
         post_mock = MagicMock(
             return_value=_mock_response(json_data={"process_id": "job-bad-dl"})
         )
+        # GET sequence: first call returns a Completed status (breaks the
+        # polling loop), second call returns a malformed download-URL body.
+        # `side_effect` order encodes the production call order; if a future
+        # refactor adds a pre-flight GET or a retry, this list would be
+        # consumed out of order. `assert get_mock.call_count == 2` below
+        # locks the assumption so the failure mode under refactor is loud.
         status_resp = _mock_response(json_data={"status": "Completed"})
         dl_url_resp = _mock_response(text="not json at all")
         dl_url_resp.json.side_effect = ValueError("invalid JSON")
@@ -556,8 +616,11 @@ class TestMalformedDownloadJson:
             result = topaz_enhance_image(inp, output_path=out_path)
 
         assert result is None
+        assert get_mock.call_count == 2
         err = capsys.readouterr().err
-        assert "topaz" in err.lower()
+        assert "Topaz download URL" in err
+        assert "job-bad-dl" in err
+        assert "non-JSON" in err
 
 
 # ---------------------------------------------------------------------------

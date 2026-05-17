@@ -198,6 +198,50 @@ class TestDocumentImagePromptTableEscaping:
         assert "line1 line2" in table_row
         assert "line1  line2" not in table_row
 
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "line1\r\nline2",  # CRLF (single, most common Windows)
+            "line1\n\rline2",  # LFCR (reversed order)
+            "line1\n\nline2",  # consecutive LFs
+            "line1\r\rline2",  # consecutive CRs
+            "line1\n\n\nline2",  # three consecutive LFs
+            "line1\r\nline2\r\nline3",  # multiple CRLFs (chained .replace would yield "line1 line2 line3" by coincidence; the second CRLF still tests the + quantifier)
+        ],
+        ids=[
+            "single-crlf",
+            "lfcr-reversed",
+            "double-lf",
+            "double-cr",
+            "triple-lf",
+            "multi-crlf",
+        ],
+    )
+    def test_newline_runs_collapse_to_single_space(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        prompt: str,
+    ) -> None:
+        # The fix replaces `.replace("\r"," ").replace("\n"," ")` with
+        # `re.sub(r"[\r\n]+", " ", ...)`. The `+` quantifier is what
+        # distinguishes correct behavior across these inputs. A naive
+        # `re.sub(r"[\r\n]{1,2}", " ", ...)` or any chained-replace variant
+        # would produce more than one space on at least one of these cases.
+        body = _run_document_prompt(tmp_path, monkeypatch, prompt=prompt)
+        table_row = next(
+            line
+            for line in body.splitlines()
+            if "line1" in line and line.startswith("|")
+        )
+        # No matter how many newlines were present, all runs collapse to
+        # exactly one space. We assert "line1 line" (one space, then the
+        # start of either "line2" or "line2 line3") and forbid any
+        # consecutive-space pattern between "line1" and the next "line".
+        assert "line1 line" in table_row
+        assert "line1  " not in table_row
+        assert "line1   " not in table_row
+
     def test_backslash_before_pipe_order_is_load_bearing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
