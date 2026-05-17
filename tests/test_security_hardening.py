@@ -184,6 +184,64 @@ class TestDocumentImagePromptTableEscaping:
         # Exactly one row, single-cell content collapsed to one space.
         assert "line1 line2" in table_row
 
+    def test_crlf_in_prompt_collapsed_to_single_space(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Guard against the chained .replace("\r", " ").replace("\n", " ")
+        # pattern: that turns a single CRLF into TWO spaces, not one.
+        body = _run_document_prompt(tmp_path, monkeypatch, prompt="line1\r\nline2")
+        table_row = next(
+            line
+            for line in body.splitlines()
+            if "line1" in line and line.startswith("|")
+        )
+        assert "line1 line2" in table_row
+        assert "line1  line2" not in table_row
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "line1\r\nline2",  # CRLF (single, most common Windows)
+            "line1\n\rline2",  # LFCR (reversed order)
+            "line1\n\nline2",  # consecutive LFs
+            "line1\r\rline2",  # consecutive CRs
+            "line1\n\n\nline2",  # three consecutive LFs
+            "line1\r\nline2\r\nline3",  # multiple CRLFs (chained .replace would yield "line1 line2 line3" by coincidence; the second CRLF still tests the + quantifier)
+        ],
+        ids=[
+            "single-crlf",
+            "lfcr-reversed",
+            "double-lf",
+            "double-cr",
+            "triple-lf",
+            "multi-crlf",
+        ],
+    )
+    def test_newline_runs_collapse_to_single_space(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        prompt: str,
+    ) -> None:
+        # The fix replaces `.replace("\r"," ").replace("\n"," ")` with
+        # `re.sub(r"[\r\n]+", " ", ...)`. The `+` quantifier is what
+        # distinguishes correct behavior across these inputs. A naive
+        # `re.sub(r"[\r\n]{1,2}", " ", ...)` or any chained-replace variant
+        # would produce more than one space on at least one of these cases.
+        body = _run_document_prompt(tmp_path, monkeypatch, prompt=prompt)
+        table_row = next(
+            line
+            for line in body.splitlines()
+            if "line1" in line and line.startswith("|")
+        )
+        # No matter how many newlines were present, all runs collapse to
+        # exactly one space. We assert "line1 line" (one space, then the
+        # start of either "line2" or "line2 line3") and forbid any
+        # consecutive-space pattern between "line1" and the next "line".
+        assert "line1 line" in table_row
+        assert "line1  " not in table_row
+        assert "line1   " not in table_row
+
     def test_backslash_before_pipe_order_is_load_bearing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -299,26 +357,43 @@ class TestDefaultFilenameRandomToken:
         )
 
     def test_story_auto_prefix_includes_random_token(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Exercise just the prefix-derivation path used when output_prefix is
-        # None; the full story-generation flow is covered elsewhere.
-        # Validate the same idiom used inside generate_story_sequence; this
-        # test locks the format so a refactor cannot silently drop the token.
-        import secrets
-        from datetime import UTC, datetime
+        # Drive generate_story_sequence with output_prefix=None and capture
+        # the output_path that the production code builds for part 1. The
+        # mock lets us inspect the prefix the production code derived,
+        # rather than re-implementing the derivation in the test.
+        from unittest.mock import patch
 
         from scripts import generate_image as mod
 
-        timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
-        token = secrets.token_hex(16)
-        prefix = Path(f"story_{timestamp}_{token}")
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        part_file = tmp_path / "fake_part1.png"
+        part_file.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
 
-        assert prefix.name.startswith("story_")
-        # Same shape used by the production code:
-        # f"story_{timestamp}_{token}" -- 8 timestamp digits, '_',
-        # 6 timestamp digits, '_', 8 hex chars.
-        assert re.match(r"^story_\d{8}_\d{6}_[0-9a-f]{32}$", prefix.name), prefix.name
-        # The constant used in production is also exercised here as a smoke
-        # check that the module attribute is reachable.
-        assert mod.MAX_INPUT_IMAGE_BYTES > 0
+        with (
+            patch(
+                "scripts.generate_image.generate_image",
+                return_value=part_file,
+            ) as gen_mock,
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            mod.generate_story_sequence(
+                base_prompt="random-token regression test",
+                num_parts=1,
+                model_key="flash",
+                output_prefix=None,
+            )
+
+        # The output_path the production code passed to generate_image
+        # encodes the auto-derived prefix as
+        # story_<YYYYMMDD>_<HHMMSS>_<32hex>_part1.png
+        assert gen_mock.call_args is not None
+        captured_path = gen_mock.call_args.kwargs["output_path"]
+        assert re.match(
+            r"^story_\d{8}_\d{6}_[0-9a-f]{32}_part1$", captured_path.stem
+        ), (
+            f"output_path stem {captured_path.stem!r} does not match the "
+            f"story_<timestamp>_<token>_partN format; a refactor likely "
+            f"dropped the secrets.token_hex(16) suffix"
+        )
