@@ -71,6 +71,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Python compatibility matrix `test-command` in
+  `.github/workflows/python-compatibility.yml` simplified from
+  `pytest tests/ -v --tb=short -x --ignore=tests/integration --ignore=tests/load -m "not slow and not integration"`
+  to `pytest tests/ -v --tb=short -x`. The org reusable workflow
+  (`ByronWilliamsCPA/.github` `python-compatibility.yml@de201234`,
+  introduced by PR #25) re-executes `test-command` through a shell layer
+  that strips inner double quotes, so pytest received `-m not` and
+  treated `slow` as a positional path argument, failing all six matrix
+  cells (Python 3.12/3.13 x ubuntu/macos/windows) with exit code 4 since
+  commit `d11c726`. The removed filter and ignores were dead boilerplate
+  for this repo (no `slow` or `integration` markers exist; no
+  `tests/integration/` or `tests/load/` directories). Same workflow file
+  now also triggers on its own path so workflow-only edits get validated
+  by CI. Restore the filter only after the org workflow properly quotes
+  `inputs.test-command` AND this repo introduces those markers. (PR #33)
 - Coverage gate raised from 60% to 80% to match CLAUDE.md graduated coverage
   requirement.
 - Pre-commit em-dash hook `types_or` filter removed; the filter was ANDed with
