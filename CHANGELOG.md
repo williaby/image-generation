@@ -23,6 +23,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GitHub Actions minor/patch bumps, SHA pinning for actions, and manual
   review gating for Python version updates.
 
+### Changed
+
+- `python-compatibility.yml` `paths:` filters and `source-directory:` aligned
+  from `src/` to `scripts/` to match this repo's actual layout. The previous
+  `src/` references were a copy-paste leftover from the org template; no
+  `src/` directory exists in this repo, so the workflow's path-trigger never
+  fired on Python changes.
+- `python-compatibility.yml` matrix trimmed from
+  `["3.10", "3.11", "3.12", "3.13"]` to `["3.12", "3.13"]` to match
+  `requires-python = ">=3.12"` in `pyproject.toml`. The earlier 3.10/3.11
+  cells could not produce meaningful test results under the declared
+  support range.
+
+### Removed
+
+- `.github/workflows/fips-compatibility.yml` removed. This repo has no
+  FIPS components: no federal, HIPAA, or financial services deployment
+  target; no custom cryptography in code (HTTPS via `requests` ->
+  `urllib3` -> OpenSSL is the only crypto-adjacent surface, and FIPS
+  posture there is governed by the deployment host's OpenSSL build,
+  not by application code). The workflow referenced
+  `scripts/check_fips_compatibility.py`, which this repo never
+  contained, so every run failed with `FileNotFoundError`. Part of the
+  WF-16 10-repo cleanup sweep; canonical template hardened separately
+  so future deployments self-skip when the script is absent.
+
 ### Fixed
 
 - Coverage gate raised from 60% to 80% to match CLAUDE.md graduated coverage
@@ -56,6 +82,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All diagnostic `print()` calls in `get_topaz_api_key` redirected to
   `sys.stderr`.
 - `.env` file read in `_load_api_key` wrapped in `try/except OSError`.
+
+### Security
+
+- Pinned `urllib3>=2.7.0,<3.0.0` (transitive via `requests`) to address
+  CVE-2026-44431 (sensitive headers forwarded across origins in proxied
+  low-level redirects, affects 1.23..<2.7.0) and CVE-2026-44432
+  (decompression-bomb safeguards bypassed in parts of the streaming API,
+  affects 2.6.0..<2.7.0). Resolver moves urllib3 from 2.6.3 to 2.7.0.
 
 ## [0.1.0] - 2026-03-01
 
