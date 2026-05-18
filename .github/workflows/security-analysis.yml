@@ -27,7 +27,7 @@ jobs:
       python-version: "3.12"
       run-safety: false
       run-codeql: false
-      run-dependency-review: false
+      run-dependency-review: true
       run-osv: false
       run-bandit: false
 

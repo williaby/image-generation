@@ -84,6 +84,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `requires-python = ">=3.12"` in `pyproject.toml`. The earlier 3.10/3.11
   cells could not produce meaningful test results under the declared
   support range.
+- Dependency review enabled via the org reusable workflow:
+  `.github/workflows/security-analysis.yml` `run-dependency-review`
+  toggled from `false` to `true`. The org workflow runs
+  `actions/dependency-review-action@v5.0.0` with `fail-on-severity:
+  moderate`, `license-check: true`, and `deny-licenses: GPL-2.0, GPL-3.0`
+  on every PR to `main`/`master`. Replaces the earlier proposal (a
+  standalone `.github/workflows/dependency-review.yml`) to avoid
+  duplicating dependency-review configuration across two workflow paths.
+  Requires GitHub Dependency Graph to be enabled in repository settings
+  (Settings -> Code security and analysis -> Dependency graph); without
+  it, the action returns "Dependency review is not supported on this
+  repository" and the check fails.
 
 ### Removed
 
