@@ -15,6 +15,7 @@ Coverage targets: every branch in the function body, including:
 - Extension mismatch with auto-correction
 """
 
+import io
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -832,8 +833,8 @@ class TestDiskWriteFailure:
             patch(
                 "builtins.open",
                 side_effect=[
-                    # First open() is reading the input file for the POST
-                    open(inp, "rb"),
+                    # BytesIO instead of a real file: side_effect is built before the patch activates, so an eager open() would leak the handle on test failure.
+                    io.BytesIO(inp.read_bytes()),
                     # Second open() is the write; make it fail
                     OSError("disk full"),
                 ],
