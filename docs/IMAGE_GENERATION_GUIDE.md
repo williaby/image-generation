@@ -23,7 +23,7 @@ can tune that with `--thinking minimal|high`.
 | High-volume iteration | `flash-2 --size 512` | New 0.5K tier minimizes latency |
 | Ultra-wide / ultra-tall layouts | `flash-2` | Only flash-2 supports 21:9, 8:1, 4:1, 1:8, 1:4 |
 | Highest-fidelity text in diagrams | `pro` | Best for L1-L4 network diagrams |
-| Lowest cost, no aspect/size control | `flash` | Legacy 2.5 model
+| Lowest cost, no aspect/size control | `flash` | Legacy 2.5 model |
 
 ## Quick Start
 

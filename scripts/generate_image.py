@@ -37,7 +37,7 @@ Usage:
     python generate_image.py "A landscape" --model flash-2 --aspect 21:9 --size 4K
     python generate_image.py "A landscape" --model pro --aspect 16:9 --size 4K
 
-    # Show thinking process and save thought images (pro model only)
+    # Show thinking process and save thought images (pro / flash-2)
     python generate_image.py "Complex blueprint" --save-thoughts --verbose
 
     # Multi-part story generation
@@ -925,6 +925,16 @@ def generate_image(
             print("Google Search grounding: enabled")
 
     # Add thinking config for models that expose thinking_level (flash-2 only).
+    # #ASSUME -- google-genai >=2.2.0 accepts thinking_level as a string ("minimal"
+    #            or "high"); the SDK normalizes to types.ThinkingLevel.HIGH /
+    #            ThinkingLevel.MINIMAL internally via field aliases. The flash-2
+    #            model (gemini-3.1-flash-image-preview) is the only image model
+    #            that exposes this control; pro and flash silently ignore it.
+    # #VERIFY -- Re-check types.ThinkingConfig signature after any google-genai
+    #            version bump: `python -c "from google.genai import types;
+    #            import inspect; print(inspect.signature(types.ThinkingConfig))"`
+    #            and re-check the Nano Banana 2 docs for breaking changes to
+    #            thinking_level accepted values.
     if thinking_level:
         if not model_config.get("supports_thinking_config"):
             print(
@@ -932,6 +942,10 @@ def generate_image(
                 f" only flash-2 exposes thinking_level."
             )
         elif thinking_level not in THINKING_LEVELS:
+            # #EDGE -- Unreachable from CLI (argparse rejects via choices=THINKING_LEVELS)
+            #          but reachable when generate_image() is called programmatically
+            #          with a bogus value. Kept as a defensive guard rather than
+            #          silently passing through to the SDK.
             print(
                 f"Warning: Invalid thinking level '{thinking_level}'. Valid: {THINKING_LEVELS}"
             )
@@ -1186,6 +1200,7 @@ def generate_story_sequence(
         aspect_ratio: Aspect ratio for all images
         image_size: Image size for all images
         verbose: Show detailed process
+        thinking_level: 'minimal' or 'high' (flash-2 only) applied to every part
 
     Returns:
         List of paths to generated images

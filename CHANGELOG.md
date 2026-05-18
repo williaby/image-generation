@@ -25,8 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Default `--model` is now `flash-2` (was `pro`). Pro remains available for
-  highest-fidelity text rendering on technical diagrams.
+- **BREAKING:** Default `--model` is now `flash-2` (was `pro`). Existing
+  scripts that omit `--model` will switch from `gemini-3-pro-image-preview`
+  to `gemini-3.1-flash-image-preview`, which changes latency, billed token
+  cost, and output characteristics (Flash-tier text rendering vs. Pro-tier).
+  To pin the prior behavior, pass `--model pro` explicitly. Pro remains
+  available and is recommended for highest-fidelity text rendering on
+  technical diagrams.
 - SSRF protection for Topaz image downloads: hostname validated against an
   allowlist (`api.topazlabs.com`, `cdn.topazlabs.com`) before fetching.
 - RAD annotations (`#CRITICAL`, `#ASSUME`) marking external-API assumptions
