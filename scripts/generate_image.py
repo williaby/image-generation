@@ -1461,8 +1461,8 @@ Examples:
             sys.exit(0 if result else 1)
 
         # --- Gemini finalization path ---
-        final_size = args.size if args.size else "2K"
-        final_aspect = args.aspect if args.aspect else "16:9"
+        final_size = args.size or "2K"
+        final_aspect = args.aspect or "16:9"
 
         print(f"Finalizing draft image: {args.finalize}")
         print(f"Target resolution: {final_size} ({final_aspect})")
@@ -1485,8 +1485,7 @@ Examples:
 
         prompt = (
             args.prompt
-            if args.prompt
-            else "Recreate this image at higher resolution with the same composition, style, and details"
+            or "Recreate this image at higher resolution with the same composition, style, and details"
         )
 
         result = generate_image(
