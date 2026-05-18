@@ -1,12 +1,29 @@
 # Gemini Image Generation Best Practices Guide
 
 > **Purpose**: Generate high-quality, consistent images for documentation and presentations
-> **Model**: Gemini 3 Pro Image Preview (Nano Banana Pro)
-> **Last Updated**: 2026-01-09
+> **Models**: Gemini 3.1 Flash Image (Nano Banana 2, default) and Gemini 3 Pro Image Preview (Nano Banana Pro)
+> **Last Updated**: 2026-05-15
 
 ## Overview
 
-Gemini 3 Pro (Nano Banana Pro) uses a "thinking process" to reason through complex prompts before generating images. This makes it particularly effective for professional technical diagrams, architectural drawings, and network architecture visualizations.
+This repo supports three Gemini image models. **Nano Banana 2** (`flash-2`,
+`gemini-3.1-flash-image-preview`) is the default: it delivers Pro-tier reasoning
+and fidelity at Flash latency, supports 14 aspect ratios (including ultra-wide
+21:9 and ultra-tall 1:8), and adds a 512px resolution tier for rapid iteration.
+**Nano Banana Pro** (`pro`, `gemini-3-pro-image-preview`) remains the choice when
+you need the highest-fidelity text rendering on detailed technical diagrams.
+Both use a "thinking process" to reason through complex prompts; on flash-2 you
+can tune that with `--thinking minimal|high`.
+
+### When to pick which model
+
+| Use case | Model | Notes |
+|----------|-------|-------|
+| Default / general images | `flash-2` | Pro-quality at Flash speed and cost |
+| High-volume iteration | `flash-2 --size 512` | New 0.5K tier minimizes latency |
+| Ultra-wide / ultra-tall layouts | `flash-2` | Only flash-2 supports 21:9, 8:1, 4:1, 1:8, 1:4 |
+| Highest-fidelity text in diagrams | `pro` | Best for L1-L4 network diagrams |
+| Lowest cost, no aspect/size control | `flash` | Legacy 2.5 model |
 
 ## Quick Start
 
@@ -29,7 +46,7 @@ python scripts/generate_image.py \
 
 The `scripts/generate_image.py` script supports:
 
-- **Draft-Then-Finalize Workflow**: `--draft-mode` for fast 1K iteration, `--finalize` for high-res final
+- **Draft-Then-Finalize Workflow**: `--draft-mode` picks the smallest tier the model supports (512 on flash-2, 1K elsewhere) for fast iteration; `--finalize` upscales to high-res
 - **Thinking Process Visibility**: `--verbose` flag shows reasoning steps
 - **Thought Image Saving**: `--save-thoughts` captures intermediate refinement images
 - **Aspect Ratio Control**: 1:1, 3:4, 4:3, 9:16, 16:9
@@ -268,12 +285,14 @@ examples/
 python scripts/generate_image.py --help
 
 # Quick reference
---model pro              # Use Gemini 3 Pro (recommended)
---model flash            # Use Gemini 2.5 Flash (faster)
---aspect 16:9            # Aspect ratio (1:1, 3:4, 4:3, 9:16, 16:9)
---size 2K                # Resolution (1K, 2K, 4K)
+--model flash-2          # Nano Banana 2 / Gemini 3.1 Flash Image (default)
+--model pro              # Nano Banana Pro / Gemini 3 Pro (highest quality)
+--model flash            # Gemini 2.5 Flash (legacy)
+--aspect 16:9            # Aspect ratio (flash-2: 14 options; pro: 5 options)
+--size 2K                # Resolution (flash-2: 512/1K/2K/4K; pro: 1K/2K/4K)
+--thinking high          # flash-2 thinking level: minimal | high
 -r image.png             # Reference image (can use multiple)
---draft-mode             # Generate at 1K for iteration
+--draft-mode             # Generate at smallest model-supported tier (512 on flash-2, else 1K)
 --finalize draft.png     # Upscale draft to final resolution
 --verbose, -v            # Show thinking process
 --save-thoughts          # Save intermediate thought images

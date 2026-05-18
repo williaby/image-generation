@@ -529,6 +529,9 @@ class TestListModels:
         out = capsys.readouterr().out
         assert "flash" in out.lower()
         assert "pro" in out.lower()
+        # Nano Banana 2 (gemini-3.1-flash-image-preview)
+        assert "flash-2" in out.lower()
+        assert "gemini-3.1-flash-image-preview" in out
 
 
 # ---------------------------------------------------------------------------
@@ -2840,3 +2843,616 @@ class TestMain:
 
         assert exc_info.value.code == 0
         assert mock_enhance.called
+
+
+# ---------------------------------------------------------------------------
+# Per-model aspect_ratios / image_sizes validation (new in flash-2)
+# ---------------------------------------------------------------------------
+
+
+class TestPerModelAspectRatioValidation:
+    """Aspect ratios valid for one model can be invalid for another."""
+
+    def test_flash2_accepts_21_9_that_pro_rejects(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """21:9 is in flash-2's aspect_ratios but not pro's; flash-2 must not warn."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="ultra-wide",
+                model_key="flash-2",
+                output_path=tmp_path / "output" / "ultra.png",
+                aspect_ratio="21:9",
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "not supported" not in out.lower()
+        assert "21:9" in out
+        # Stdout proves the validation branch accepted the value, but we also
+        # need to prove it reached the SDK. Inspect the mocked generate_content
+        # call to confirm the ImageConfig carries aspect_ratio="21:9".
+        config = mock_client_instance.models.generate_content.call_args.kwargs[
+            "config"
+        ]
+        assert config.image_config is not None
+        assert config.image_config.aspect_ratio == "21:9"
+
+    def test_pro_rejects_21_9_with_warning_naming_the_model(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """21:9 on pro emits a warning that names the active model."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="pro rejects 21:9",
+                model_key="pro",
+                output_path=tmp_path / "output" / "pro21.png",
+                aspect_ratio="21:9",
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "warning" in out.lower()
+        assert "21:9" in out
+        assert "pro" in out.lower()
+
+    def test_flash_warns_when_aspect_or_size_supplied(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Legacy flash silently dropped --aspect/--size before; now warns."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="flash dropped aspect",
+                model_key="flash",
+                output_path=tmp_path / "output" / "flash_warn.png",
+                aspect_ratio="16:9",
+                image_size="2K",
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "does not support" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# --thinking flag -> types.ThinkingConfig wiring (flash-2 only)
+# ---------------------------------------------------------------------------
+
+
+class TestThinkingLevelFlag:
+    def test_flash2_sets_thinking_config_in_generate_content_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """thinking_level='high' on flash-2 reaches the SDK via ThinkingConfig."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            mod.generate_image(
+                prompt="thinking high",
+                model_key="flash-2",
+                output_path=tmp_path / "output" / "tc.png",
+                thinking_level="high",
+                document_prompt=False,
+            )
+
+        call_kwargs = mock_client_instance.models.generate_content.call_args.kwargs
+        config = call_kwargs["config"]
+        assert config.thinking_config is not None
+        # google-genai normalizes 'high' -> ThinkingLevel.HIGH; str contains 'HIGH'.
+        assert "HIGH" in str(config.thinking_config.thinking_level).upper()
+
+    def test_thinking_on_pro_warns_and_omits_thinking_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Pro does not expose thinking_level; the flag warns and is dropped."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            mod.generate_image(
+                prompt="thinking on pro is a no-op",
+                model_key="pro",
+                output_path=tmp_path / "output" / "pro_tc.png",
+                thinking_level="high",
+                document_prompt=False,
+            )
+
+        out = capsys.readouterr().out
+        assert "no effect" in out.lower() or "warning" in out.lower()
+        config = mock_client_instance.models.generate_content.call_args.kwargs["config"]
+        assert config.thinking_config is None
+
+
+# ---------------------------------------------------------------------------
+# main() forwards --thinking to generate_image() / generate_story_sequence()
+# ---------------------------------------------------------------------------
+
+
+class TestMainThinkingForwarding:
+    """Verify args.thinking reaches the call sites at L1577 / L1604 / L1648."""
+
+    def test_single_image_forwards_thinking(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        result_path = tmp_path / "out.png"
+        result_path.write_bytes(_PNG_MAGIC)
+        mock_generate = MagicMock(return_value=result_path)
+
+        with (
+            patch(
+                "sys.argv",
+                ["generate_image.py", "a prompt", "--thinking", "high"],
+            ),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit),
+        ):
+            mod.main()
+
+        assert mock_generate.called
+        assert mock_generate.call_args.kwargs.get("thinking_level") == "high"
+
+    def test_story_sequence_forwards_thinking(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        mock_story = MagicMock(return_value=[tmp_path / "p1.png"])
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "generate_image.py",
+                    "a story",
+                    "--story-parts",
+                    "2",
+                    "--thinking",
+                    "minimal",
+                ],
+            ),
+            patch("scripts.generate_image.generate_story_sequence", mock_story),
+            pytest.raises(SystemExit),
+        ):
+            mod.main()
+
+        assert mock_story.called
+        assert mock_story.call_args.kwargs.get("thinking_level") == "minimal"
+
+    def test_finalize_forwards_thinking(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        draft = tmp_path / "draft.png"
+        draft.write_bytes(_PNG_MAGIC)
+        final = tmp_path / "final.png"
+        final.write_bytes(_PNG_MAGIC)
+        mock_generate = MagicMock(return_value=final)
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "generate_image.py",
+                    "--finalize",
+                    str(draft),
+                    "--thinking",
+                    "high",
+                ],
+            ),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit),
+        ):
+            mod.main()
+
+        assert mock_generate.called
+        assert mock_generate.call_args.kwargs.get("thinking_level") == "high"
+
+
+class TestThinkingLevelMinimalAndInvalid:
+    """Cover thinking_level='minimal' and the programmatic invalid-value path."""
+
+    def test_flash2_thinking_minimal_reaches_sdk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            mod.generate_image(
+                prompt="minimal thinking",
+                model_key="flash-2",
+                output_path=tmp_path / "output" / "min.png",
+                thinking_level="minimal",
+                document_prompt=False,
+            )
+
+        config = mock_client_instance.models.generate_content.call_args.kwargs[
+            "config"
+        ]
+        assert config.thinking_config is not None
+        assert "MINIMAL" in str(config.thinking_config.thinking_level).upper()
+
+    def test_programmatic_invalid_thinking_level_warns_and_omits(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """generate_image() called programmatically with a bogus thinking_level."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            mod.generate_image(
+                prompt="bogus level",
+                model_key="flash-2",
+                output_path=tmp_path / "output" / "bad.png",
+                thinking_level="ultra",
+                document_prompt=False,
+            )
+
+        out = capsys.readouterr().out
+        assert "invalid thinking level" in out.lower()
+        config = mock_client_instance.models.generate_content.call_args.kwargs[
+            "config"
+        ]
+        assert config.thinking_config is None
+
+
+class TestArgparseThinkingChoices:
+    """argparse rejects --thinking values outside the choices list."""
+
+    def test_argparse_rejects_invalid_thinking_value(self) -> None:
+        import scripts.generate_image as mod
+
+        with (
+            patch(
+                "sys.argv",
+                ["generate_image.py", "a prompt", "--thinking", "xyz"],
+            ),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        # argparse exits with code 2 on unrecognized choice
+        assert exc_info.value.code == 2
+
+
+class TestFlash2ImageSize512:
+    """The new 512 tier is accepted by flash-2 and reaches the SDK."""
+
+    def test_flash2_accepts_size_512(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="0.5K tier",
+                model_key="flash-2",
+                output_path=tmp_path / "output" / "tiny.png",
+                image_size="512",
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "not supported" not in out.lower()
+        config = mock_client_instance.models.generate_content.call_args.kwargs[
+            "config"
+        ]
+        assert config.image_config is not None
+        assert config.image_config.image_size == "512"
+
+    def test_pro_rejects_size_512_with_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """pro's image_sizes list excludes 512; warning names the model."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        part = _make_fake_part(inline_data=inline)
+        fake_response = _make_fake_response([part])
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+        ):
+            result = mod.generate_image(
+                prompt="pro rejects 512",
+                model_key="pro",
+                output_path=tmp_path / "output" / "pro512.png",
+                image_size="512",
+                document_prompt=False,
+            )
+
+        assert result is not None
+        out = capsys.readouterr().out
+        assert "warning" in out.lower()
+        assert "512" in out
+        assert "pro" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Draft mode picks 512 on flash-2 and 1K elsewhere (model-aware default)
+# ---------------------------------------------------------------------------
+
+
+class TestDraftModeModelAwareSize:
+    def test_draft_mode_on_flash2_uses_512(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--draft-mode with default model (flash-2) forwards image_size='512'."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        result_path = tmp_path / "out.png"
+        result_path.write_bytes(_PNG_MAGIC)
+        mock_generate = MagicMock(return_value=result_path)
+
+        with (
+            patch(
+                "sys.argv",
+                ["generate_image.py", "a prompt", "--draft-mode"],
+            ),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit),
+        ):
+            mod.main()
+
+        assert mock_generate.called
+        assert mock_generate.call_args.kwargs.get("image_size") == "512"
+
+    def test_draft_mode_on_pro_uses_1k(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--draft-mode --model pro forwards image_size='1K' (pro lacks 512)."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        result_path = tmp_path / "out.png"
+        result_path.write_bytes(_PNG_MAGIC)
+        mock_generate = MagicMock(return_value=result_path)
+
+        with (
+            patch(
+                "sys.argv",
+                ["generate_image.py", "a prompt", "--draft-mode", "--model", "pro"],
+            ),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit),
+        ):
+            mod.main()
+
+        assert mock_generate.called
+        assert mock_generate.call_args.kwargs.get("image_size") == "1K"
+
+    def test_explicit_size_overrides_draft_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--draft-mode --size 2K wins over the model-aware default."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        result_path = tmp_path / "out.png"
+        result_path.write_bytes(_PNG_MAGIC)
+        mock_generate = MagicMock(return_value=result_path)
+
+        with (
+            patch(
+                "sys.argv",
+                ["generate_image.py", "a prompt", "--draft-mode", "--size", "2K"],
+            ),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit),
+        ):
+            mod.main()
+
+        assert mock_generate.called
+        assert mock_generate.call_args.kwargs.get("image_size") == "2K"
+
+    def test_draft_mode_on_legacy_flash_passes_no_size(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """flash has no image_sizes; --draft-mode --model flash sets image_size=None."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        result_path = tmp_path / "out.png"
+        result_path.write_bytes(_PNG_MAGIC)
+        mock_generate = MagicMock(return_value=result_path)
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "generate_image.py",
+                    "a prompt",
+                    "--draft-mode",
+                    "--model",
+                    "flash",
+                ],
+            ),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit),
+        ):
+            mod.main()
+
+        assert mock_generate.called
+        # flash has no size tiers, so effective_size should be None - not "1K".
+        assert mock_generate.call_args.kwargs.get("image_size") is None
+        # The user-facing message must reflect the no-size case, not advertise
+        # a resolution the model cannot honor.
+        out = capsys.readouterr().out
+        assert "no size control" in out.lower()
+        assert "Generating at 1K" not in out
