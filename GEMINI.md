@@ -24,8 +24,8 @@ detect-secrets pre-commit hooks.
 ## Model selection for Gemini
 
 The script exposes three Gemini image models. Defaults and recommendations
-were updated 2026-05 when Google released Nano Banana 2 and made it the
-ecosystem default.
+were updated in 2026-05 when Google released Nano Banana 2; this project
+set `flash-2` as its default model to match.
 
 | Task | Model (script key) | API model ID | Why |
 | ---- | ------------------ | ------------ | --- |

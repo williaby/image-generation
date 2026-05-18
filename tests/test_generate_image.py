@@ -2891,6 +2891,14 @@ class TestPerModelAspectRatioValidation:
         out = capsys.readouterr().out
         assert "not supported" not in out.lower()
         assert "21:9" in out
+        # Stdout proves the validation branch accepted the value, but we also
+        # need to prove it reached the SDK. Inspect the mocked generate_content
+        # call to confirm the ImageConfig carries aspect_ratio="21:9".
+        config = mock_client_instance.models.generate_content.call_args.kwargs[
+            "config"
+        ]
+        assert config.image_config is not None
+        assert config.image_config.aspect_ratio == "21:9"
 
     def test_pro_rejects_21_9_with_warning_naming_the_model(
         self,
@@ -3409,3 +3417,42 @@ class TestDraftModeModelAwareSize:
 
         assert mock_generate.called
         assert mock_generate.call_args.kwargs.get("image_size") == "2K"
+
+    def test_draft_mode_on_legacy_flash_passes_no_size(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """flash has no image_sizes; --draft-mode --model flash sets image_size=None."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        result_path = tmp_path / "out.png"
+        result_path.write_bytes(_PNG_MAGIC)
+        mock_generate = MagicMock(return_value=result_path)
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "generate_image.py",
+                    "a prompt",
+                    "--draft-mode",
+                    "--model",
+                    "flash",
+                ],
+            ),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit),
+        ):
+            mod.main()
+
+        assert mock_generate.called
+        # flash has no size tiers, so effective_size should be None - not "1K".
+        assert mock_generate.call_args.kwargs.get("image_size") is None
+        # The user-facing message must reflect the no-size case, not advertise
+        # a resolution the model cannot honor.
+        out = capsys.readouterr().out
+        assert "no size control" in out.lower()
+        assert "Generating at 1K" not in out

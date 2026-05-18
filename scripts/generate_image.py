@@ -134,15 +134,17 @@ MODELS = {
 
 DEFAULT_MODEL = "flash-2"  # Google's new default; Pro-quality at Flash speed.
 
-# Union of valid aspect ratios across all models (used for argparse choices).
-# Per-model validation happens inside generate_image() against MODELS[key].
-ASPECT_RATIOS = [
-    "1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3",
-    "4:5", "5:4", "8:1", "9:16", "16:9", "21:9",
-]
-
-# Union of valid image sizes across all models.
-IMAGE_SIZES = ["512", "1K", "2K", "4K"]
+# Union of valid values across all models (used for argparse choices). Derived
+# from MODELS so a future model edit cannot silently desync the CLI from the
+# actual capabilities. Per-model validation still happens inside
+# generate_image() against MODELS[key] for accurate error messages.
+# dict.fromkeys preserves first-seen order while deduplicating.
+ASPECT_RATIOS = list(
+    dict.fromkeys(r for m in MODELS.values() for r in m.get("aspect_ratios", []))
+)
+IMAGE_SIZES = list(
+    dict.fromkeys(s for m in MODELS.values() for s in m.get("image_sizes", []))
+)
 
 # Valid thinking levels for models that support thinking_config.
 THINKING_LEVELS = ["minimal", "high"]
@@ -1644,18 +1646,34 @@ Examples:
     # Single image mode
     else:
         # Draft mode picks the smallest tier the active model supports so
-        # iteration is fast and cheap. flash-2 offers a 512 (0.5K) tier; pro
-        # and legacy flash do not, so they fall back to 1K. A user-specified
-        # --size always wins (treat as explicit override).
+        # iteration is fast and cheap. Capability is read from MODELS rather
+        # than hardcoded so a future model entry that adds 512 (or removes
+        # 1K) Just Works. Legacy 'flash' has no size control at all - we
+        # set effective_size=None so generate_image() does not receive a
+        # bogus value (which would also trigger its
+        # "does not support --aspect or --size" warning misleadingly).
+        # A user-specified --size always wins as an explicit override.
         if args.draft_mode and args.size is None:
-            effective_size = "512" if args.model == "flash-2" else "1K"
+            supported_sizes = MODELS[args.model].get("image_sizes", [])
+            if "512" in supported_sizes:
+                effective_size = "512"
+            elif "1K" in supported_sizes:
+                effective_size = "1K"
+            else:
+                effective_size = None
         else:
             effective_size = args.size
 
         if args.draft_mode:
-            print(
-                f"Draft mode: Generating at {effective_size} resolution for fast iteration"
-            )
+            if effective_size:
+                print(
+                    f"Draft mode: Generating at {effective_size} resolution for fast iteration"
+                )
+            else:
+                print(
+                    f"Draft mode: {MODELS[args.model]['name']} has no size control;"
+                    " generating at the model's default resolution"
+                )
             print("Drafts are stored in output/drafts/")
             print("Use --finalize <draft_image.png> to upscale to final resolution\n")
 
