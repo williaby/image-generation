@@ -686,9 +686,9 @@ class TestGenerateImageSuccess:
         # that drops the secrets.token_hex(4) suffix would fail this regex.
         import re
 
-        assert re.match(
-            r"^generated_\d{8}_\d{6}_[0-9a-f]{32}\.\w+$", result.name
-        ), result.name
+        assert re.match(r"^generated_\d{8}_\d{6}_[0-9a-f]{32}\.\w+$", result.name), (
+            result.name
+        )
 
 
 class TestGenerateImageEmptyCandidates:
@@ -930,9 +930,9 @@ class TestGenerateImageDraftMode:
         assert result.parent.name == "drafts"
         import re
 
-        assert re.match(
-            r"^draft_\d{8}_\d{6}_[0-9a-f]{32}\.\w+$", result.name
-        ), result.name
+        assert re.match(r"^draft_\d{8}_\d{6}_[0-9a-f]{32}\.\w+$", result.name), (
+            result.name
+        )
 
 
 def _patch_pro_model_types() -> tuple[Any, Any]:

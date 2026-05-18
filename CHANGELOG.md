@@ -34,6 +34,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bumped in `requirements.txt` only and `pyproject.toml` retained the prior
   constraint, causing `uv sync` (used by every CI workflow) to silently
   resolve the old version.
+- `.pre-commit-config.yaml` `astral-sh/ruff-pre-commit` rev bumped from
+  `v0.7.4` (SHA `cafecb2f...`) to `v0.15.11` (SHA `d1b83317...`) to match
+  the project's pinned ruff in `uv.lock` (`ruff==0.15.11`). The older pin's
+  ruff formatter disagreed with the project's modern ruff, so
+  `pre-commit run --all-files` locally would reformat files that current
+  ruff considered already-formatted. With the pins aligned, pre-commit and
+  CI agree on canonical formatting. SHA-pin format preserved per PR #18
+  PC-* compliance work. Two source files surfaced minor adjustments under
+  the new hook: `scripts/generate_image.py` (two SIM222 simplifications,
+  `x if x else y` -> `x or y`) and `tests/test_generate_image.py` (two
+  assertion-message line-wrap adjustments). Discovered while triaging
+  local pre-commit drift during PR #26 review.
 - `google-genai` dependency upgraded from `>=0.4.0,<2.0.0` (resolved at
   `0.8.0`) to `>=2.2.0,<2.3.0`. Pin updated in `pyproject.toml`,
   `requirements.txt`, and `uv.lock` so all three manifests agree. Upstream

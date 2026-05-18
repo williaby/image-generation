@@ -10,7 +10,7 @@ repos:
       - id: mixed-line-ending
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: cafecb2f683a620516412e109877570ca7648cbd  # v0.7.4
+    rev: d1b833175a5d08a925900115526febd8fe71c98e  # v0.15.11
     hooks:
       - id: ruff
         args: [--fix]
