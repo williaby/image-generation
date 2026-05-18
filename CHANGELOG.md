@@ -42,9 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   weekly `lockFileMaintenance` to keep `uv.lock` in sync, auto-merge for
   GitHub Actions minor/patch bumps, SHA pinning for actions, and manual
   review gating for Python version updates.
-
-### Changed
-
 - `renovate.json` `packageRules` extended with a cross-manager grouping entry
   for `pep621` and `pip_requirements`. Single-package Python bumps now
   produce one PR that updates both `pyproject.toml` and `requirements.txt`

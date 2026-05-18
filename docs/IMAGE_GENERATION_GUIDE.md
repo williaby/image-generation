@@ -46,7 +46,7 @@ python scripts/generate_image.py \
 
 The `scripts/generate_image.py` script supports:
 
-- **Draft-Then-Finalize Workflow**: `--draft-mode` for fast 1K iteration, `--finalize` for high-res final
+- **Draft-Then-Finalize Workflow**: `--draft-mode` picks the smallest tier the model supports (512 on flash-2, 1K elsewhere) for fast iteration; `--finalize` upscales to high-res
 - **Thinking Process Visibility**: `--verbose` flag shows reasoning steps
 - **Thought Image Saving**: `--save-thoughts` captures intermediate refinement images
 - **Aspect Ratio Control**: 1:1, 3:4, 4:3, 9:16, 16:9
@@ -292,7 +292,7 @@ python scripts/generate_image.py --help
 --size 2K                # Resolution (flash-2: 512/1K/2K/4K; pro: 1K/2K/4K)
 --thinking high          # flash-2 thinking level: minimal | high
 -r image.png             # Reference image (can use multiple)
---draft-mode             # Generate at 1K for iteration
+--draft-mode             # Generate at smallest model-supported tier (512 on flash-2, else 1K)
 --finalize draft.png     # Upscale draft to final resolution
 --verbose, -v            # Show thinking process
 --save-thoughts          # Save intermediate thought images

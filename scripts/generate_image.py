@@ -1643,10 +1643,19 @@ Examples:
 
     # Single image mode
     else:
-        effective_size = "1K" if args.draft_mode else args.size
+        # Draft mode picks the smallest tier the active model supports so
+        # iteration is fast and cheap. flash-2 offers a 512 (0.5K) tier; pro
+        # and legacy flash do not, so they fall back to 1K. A user-specified
+        # --size always wins (treat as explicit override).
+        if args.draft_mode and args.size is None:
+            effective_size = "512" if args.model == "flash-2" else "1K"
+        else:
+            effective_size = args.size
 
         if args.draft_mode:
-            print("Draft mode: Generating at 1K resolution for fast iteration")
+            print(
+                f"Draft mode: Generating at {effective_size} resolution for fast iteration"
+            )
             print("Drafts are stored in output/drafts/")
             print("Use --finalize <draft_image.png> to upscale to final resolution\n")
 

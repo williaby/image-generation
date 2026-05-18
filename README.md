@@ -21,7 +21,7 @@ The `generate_image.py` script supports:
   - `flash-2`: **Nano Banana 2** / Gemini 3.1 Flash Image - *default* (Pro-quality at Flash speed, 14 aspect ratios, 512/1K/2K/4K, configurable thinking, Search grounding)
   - `pro`: Nano Banana Pro / Gemini 3 Pro (highest quality, best text rendering, Google Search grounding)
 
-- **Draft-Then-Finalize Workflow**: `--draft-mode` generates at 1K for fast iteration, then `--finalize` upscales to 2K/4K for production
+- **Draft-Then-Finalize Workflow**: `--draft-mode` generates at the smallest tier the active model supports (512 on flash-2, 1K elsewhere) for fast iteration, then `--finalize` upscales to 2K/4K for production. Pass `--size` to override.
 - **Aspect Ratio Control**: flash-2 supports 14 ratios (1:1, 1:4, 1:8, 2:3, 3:2, 3:4, 4:1, 4:3, 4:5, 5:4, 8:1, 9:16, 16:9, 21:9); pro supports 1:1, 3:4, 4:3, 9:16, 16:9
 - **Resolution Options**: 512 (flash-2 only), 1K, 2K, 4K
 - **Thinking Control** (flash-2): `--thinking minimal|high` to trade latency for quality
@@ -119,7 +119,7 @@ python scripts/generate_image.py --help
 --size 2K                # Resolution (512 flash-2 only; 1K, 2K, 4K)
 --thinking high          # Thinking level for flash-2 (minimal|high)
 -r image.png             # Reference image (can use multiple)
---draft-mode             # Generate at 1K for iteration
+--draft-mode             # Generate at smallest model-supported tier (512 on flash-2, else 1K)
 --finalize draft.png     # Upscale draft to final resolution
 --verbose, -v            # Show thinking process
 --save-thoughts          # Save intermediate thought images

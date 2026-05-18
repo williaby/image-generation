@@ -3330,3 +3330,82 @@ class TestFlash2ImageSize512:
         assert "warning" in out.lower()
         assert "512" in out
         assert "pro" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Draft mode picks 512 on flash-2 and 1K elsewhere (model-aware default)
+# ---------------------------------------------------------------------------
+
+
+class TestDraftModeModelAwareSize:
+    def test_draft_mode_on_flash2_uses_512(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--draft-mode with default model (flash-2) forwards image_size='512'."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        result_path = tmp_path / "out.png"
+        result_path.write_bytes(_PNG_MAGIC)
+        mock_generate = MagicMock(return_value=result_path)
+
+        with (
+            patch(
+                "sys.argv",
+                ["generate_image.py", "a prompt", "--draft-mode"],
+            ),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit),
+        ):
+            mod.main()
+
+        assert mock_generate.called
+        assert mock_generate.call_args.kwargs.get("image_size") == "512"
+
+    def test_draft_mode_on_pro_uses_1k(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--draft-mode --model pro forwards image_size='1K' (pro lacks 512)."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        result_path = tmp_path / "out.png"
+        result_path.write_bytes(_PNG_MAGIC)
+        mock_generate = MagicMock(return_value=result_path)
+
+        with (
+            patch(
+                "sys.argv",
+                ["generate_image.py", "a prompt", "--draft-mode", "--model", "pro"],
+            ),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit),
+        ):
+            mod.main()
+
+        assert mock_generate.called
+        assert mock_generate.call_args.kwargs.get("image_size") == "1K"
+
+    def test_explicit_size_overrides_draft_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--draft-mode --size 2K wins over the model-aware default."""
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        result_path = tmp_path / "out.png"
+        result_path.write_bytes(_PNG_MAGIC)
+        mock_generate = MagicMock(return_value=result_path)
+
+        with (
+            patch(
+                "sys.argv",
+                ["generate_image.py", "a prompt", "--draft-mode", "--size", "2K"],
+            ),
+            patch("scripts.generate_image.generate_image", mock_generate),
+            pytest.raises(SystemExit),
+        ):
+            mod.main()
+
+        assert mock_generate.called
+        assert mock_generate.call_args.kwargs.get("image_size") == "2K"
