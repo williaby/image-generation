@@ -8,8 +8,8 @@ This file is the project-level companion to [AGENTS.md](AGENTS.md) and
 This repository uses Gemini in two distinct ways:
 
 1. **As a runtime image-generation backend** via `scripts/generate_image.py`,
-   which calls the `google-genai` SDK against Gemini 2.5 Flash and Gemini 3 Pro
-   for image synthesis.
+   which calls the `google-genai` SDK against Gemini 2.5 Flash, Gemini 3.1
+   Flash Image (Nano Banana 2), and Gemini 3 Pro Image for image synthesis.
 2. **As an optional reviewer model** when contributors use the Gemini CLI or
    the Gemini API for code review and analysis tasks. This is opt-in; no
    workflow depends on it.
@@ -23,11 +23,20 @@ detect-secrets pre-commit hooks.
 
 ## Model selection for Gemini
 
-| Task | Model | Why |
-| ---- | ----- | --- |
-| High-quality image generation | `gemini-3-pro` | Best fidelity, slower |
-| Fast iteration on prompts | `gemini-2.5-flash` | Lower latency, lower cost |
-| Reviewing PR diffs (opt-in) | `gemini-3-pro` | Long-context reasoning |
+The script exposes three Gemini image models. Defaults and recommendations
+were updated in 2026-05 when Google released Nano Banana 2; this project
+set `flash-2` as its default model to match.
+
+| Task | Model (script key) | API model ID | Why |
+| ---- | ------------------ | ------------ | --- |
+| **Default image generation** | `flash-2` | `gemini-3.1-flash-image-preview` | Pro-quality reasoning at Flash speed/cost; new default since May 2026 |
+| Highest-fidelity text in technical diagrams | `pro` | `gemini-3-pro-image-preview` | Best fidelity for L1-L4 network diagrams; slower |
+| Legacy fast iteration (no aspect/size control) | `flash` | `gemini-2.5-flash-image` | Lower latency, lower cost; predates the 3.x line |
+| Reviewing PR diffs (opt-in) | n/a | `gemini-3-pro` | Long-context reasoning; not image-generation |
+
+Override the default with `--model pro` when generating text-heavy technical
+diagrams. The pre-2026-05 default was `pro`; scripts that relied on the
+implicit default may want to pin `--model pro` explicitly.
 
 ## Operational notes
 

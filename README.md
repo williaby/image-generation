@@ -6,7 +6,7 @@ A collection of scripts and agents for generating images using Google's Gemini A
 
 This repository contains:
 
-- **`scripts/generate_image.py`** - Full-featured Python script for generating images using Gemini 2.5 Flash and Gemini 3 Pro
+- **`scripts/generate_image.py`** - Full-featured Python script for generating images using Gemini 2.5 Flash, Gemini 3.1 Flash Image (Nano Banana 2), and Gemini 3 Pro
 - **`docs/IMAGE_GENERATION_GUIDE.md`** - Best practices guide for prompt engineering and workflows
 - **`agents/diagram-specialist.md`** - Claude agent configuration for validating AI-generated technical diagrams
 
@@ -16,13 +16,15 @@ This repository contains:
 
 The `generate_image.py` script supports:
 
-- **Two Gemini Models**:
-  - `flash`: Gemini 2.5 Flash (fast generation)
-  - `pro`: Gemini 3 Pro (4K, better text rendering, Google Search grounding)
+- **Three Gemini Models**:
+  - `flash`: Gemini 2.5 Flash (legacy fast generation)
+  - `flash-2`: **Nano Banana 2** / Gemini 3.1 Flash Image - *default* (Pro-quality at Flash speed, 14 aspect ratios, 512/1K/2K/4K, configurable thinking, Search grounding)
+  - `pro`: Nano Banana Pro / Gemini 3 Pro (highest quality, best text rendering, Google Search grounding)
 
-- **Draft-Then-Finalize Workflow**: Generate at 1K for fast iteration, upscale to 2K/4K for production
-- **Aspect Ratio Control**: 1:1, 3:4, 4:3, 9:16, 16:9
-- **Resolution Options**: 1K, 2K, 4K
+- **Draft-Then-Finalize Workflow**: `--draft-mode` generates at the smallest tier the active model supports (512 on flash-2, 1K elsewhere) for fast iteration, then `--finalize` upscales to 2K/4K for production. Pass `--size` to override.
+- **Aspect Ratio Control**: flash-2 supports 14 ratios (1:1, 1:4, 1:8, 2:3, 3:2, 3:4, 4:1, 4:3, 4:5, 5:4, 8:1, 9:16, 16:9, 21:9); pro supports 1:1, 3:4, 4:3, 9:16, 16:9
+- **Resolution Options**: 512 (flash-2 only), 1K, 2K, 4K
+- **Thinking Control** (flash-2): `--thinking minimal|high` to trade latency for quality
 - **Reference Image Support**: Edit existing images or transfer styles
 - **Multi-Part Story Generation**: Automatic continuity for visual sequences
 - **Thinking Mode**: View intermediate reasoning steps
@@ -110,12 +112,14 @@ python scripts/generate_image.py \
 python scripts/generate_image.py --help
 
 # Key options:
---model pro              # Use Gemini 3 Pro (recommended)
---model flash            # Use Gemini 2.5 Flash (faster)
---aspect 16:9            # Aspect ratio (1:1, 3:4, 4:3, 9:16, 16:9)
---size 2K                # Resolution (1K, 2K, 4K)
+--model flash-2          # Nano Banana 2 / Gemini 3.1 Flash Image (default)
+--model pro              # Nano Banana Pro / Gemini 3 Pro (highest quality)
+--model flash            # Gemini 2.5 Flash (legacy)
+--aspect 16:9            # Aspect ratio (flash-2 supports 14; pro supports 5)
+--size 2K                # Resolution (512 flash-2 only; 1K, 2K, 4K)
+--thinking high          # Thinking level for flash-2 (minimal|high)
 -r image.png             # Reference image (can use multiple)
---draft-mode             # Generate at 1K for iteration
+--draft-mode             # Generate at smallest model-supported tier (512 on flash-2, else 1K)
 --finalize draft.png     # Upscale draft to final resolution
 --verbose, -v            # Show thinking process
 --save-thoughts          # Save intermediate thought images
