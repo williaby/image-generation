@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: 2c9f875913ee60ca25ce70243dc24d5b6415598c  # v4.6.0
+    rev: 2c9f875913ee60ca25ce70243dc24d5b6415598c  # v4.6.0  # pragma: allowlist secret
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
@@ -10,14 +10,14 @@ repos:
       - id: mixed-line-ending
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: d1b833175a5d08a925900115526febd8fe71c98e  # v0.15.11
+    rev: d1b833175a5d08a925900115526febd8fe71c98e  # v0.15.11  # pragma: allowlist secret
     hooks:
       - id: ruff
         args: [--fix]
       - id: ruff-format
 
   - repo: https://github.com/PyCQA/bandit
-    rev: 36fd65054fc8864b4037d0918904f9331512feb5  # 1.7.10
+    rev: 36fd65054fc8864b4037d0918904f9331512feb5  # 1.7.10  # pragma: allowlist secret
     hooks:
       - id: bandit
         args: ["-c", "pyproject.toml"]
@@ -34,7 +34,10 @@ repos:
         name: basedpyright
         language: system
         entry: uv run basedpyright
-        args: ["tests/"]
+        # scripts/generate_image.py was previously excluded due to a backlog of
+        # pre-existing type errors. The 2026-05 compliance sweep (GCA-002)
+        # cleaned those up; the hook now covers both scripts/ and tests/.
+        args: ["scripts/", "tests/"]
         types: [python]
         pass_filenames: false
 
@@ -43,16 +46,80 @@ repos:
   # ============================================================================
   # Advanced secret detection beyond detect-private-key.
   # Detects API keys, tokens, credentials, and other secrets.
+  # Fail-closed: exits non-zero if trufflehog is not installed.
   - repo: local
     hooks:
       - id: trufflehog
-        name: TruffleHog Secret Scanner
-        description: Detect secrets in your data before committing
-        # Scan staged files only. The git-history mode (--since-commit HEAD) also
-        # traverses fetched remote branches in the local object store, producing
-        # false positives from unmerged branches. Staged-file scanning is the
-        # correct scope for a pre-commit hook; git history scanning belongs in CI.
-        entry: bash -c 'command -v trufflehog >/dev/null 2>&1 && (git diff --cached -z --diff-filter=d --name-only 2>/dev/null | xargs -0 -r trufflehog filesystem --fail --no-update --results=verified,unknown) || echo "TruffleHog not installed - skipping secret scan"'
+        name: TruffleHog secret scan
+        entry: >-
+          bash -c
+          'command -v trufflehog >/dev/null 2>&1 ||
+          { echo "ERROR: trufflehog not installed. Install: https://github.com/trufflesecurity/trufflehog"; exit 1; };
+          git diff --cached -z --name-only --diff-filter=d 2>/dev/null |
+          tr "\0" "\n" |
+          grep -v "^CHANGELOG\.md$" |
+          grep -v "^\.submodules/" |
+          grep -v "^$" |
+          tr "\n" "\0" |
+          xargs -0 -r trufflehog filesystem --fail --no-update'
         language: system
         pass_filenames: false
         stages: [pre-commit]
+
+  # ============================================================================
+  # Secret Detection - detect-secrets (baseline regression)
+  # ============================================================================
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: "01886c8a910c64595c47f186ca1ffc0b77fa5458"  # v1.5.0  # pragma: allowlist secret
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: ^(\.secrets\.baseline|tests/.*\.baseline)$
+        stages: [pre-commit]
+
+  # ============================================================================
+  # Docstring Coverage - interrogate
+  # ============================================================================
+  - repo: https://github.com/econchick/interrogate
+    rev: "4894019dc8876092bc9b6d56878798c550fad998"  # 1.7.0  # pragma: allowlist secret
+    hooks:
+      - id: interrogate
+        args: [--fail-under=80, scripts/]
+        pass_filenames: false
+
+  # ============================================================================
+  # Docstring Argument Validation - darglint
+  # ============================================================================
+  - repo: https://github.com/terrencepreilly/darglint
+    rev: "abc26b768cd7135d848223ba53f68323593c33d5"  # v1.8.1  # pragma: allowlist secret
+    hooks:
+      - id: darglint
+        args: [--docstring-style, google, --strictness, long]
+        exclude: ^(tests/|scripts/generate_image\.py$)
+
+  # ============================================================================
+  # Conventional Commits - commitizen
+  # ============================================================================
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: "76efedd776e04c9604a1d54fef389a292cbf7768"  # v4.0.0  # pragma: allowlist secret
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]
+
+  # ============================================================================
+  # YAML Linting - yamllint
+  # ============================================================================
+  - repo: https://github.com/adrienverge/yamllint
+    rev: "81e9f98ffd059efe8aa9c1b1a42e5cce61b640c6"  # v1.35.1  # pragma: allowlist secret
+    hooks:
+      - id: yamllint
+        args: [-c, .yamllint.yaml]
+
+  # ============================================================================
+  # Markdown Linting - markdownlint
+  # ============================================================================
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: "f295829140d25717bc79368d3f966fc1f67a824f"  # v0.41.0  # pragma: allowlist secret
+    hooks:
+      - id: markdownlint
+        args: [--config, .markdownlint.yaml, --ignore, CHANGELOG.md]

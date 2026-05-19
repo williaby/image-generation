@@ -9,7 +9,7 @@ Coverage targets: every branch in the function body, including:
 - Missing process_id in submit response
 - Missing download URL
 - SSRF guards (bad hostname, http:// scheme)
-- allow_redirects=False enforcement
+- follow_redirects=False enforcement
 - Empty image bytes
 - OSError on disk write
 - Extension mismatch with auto-correction
@@ -89,7 +89,7 @@ def _happy_path_mocks(
 
 
 # ---------------------------------------------------------------------------
-# Guard: requests not importable
+# Guard: httpx not importable
 # ---------------------------------------------------------------------------
 
 
@@ -100,20 +100,20 @@ class TestRequestsUnavailable:
         inp = _make_input_png(tmp_path)
         import scripts.generate_image as mod
 
-        original = mod.REQUESTS_AVAILABLE
+        original = mod.HTTPX_AVAILABLE
         try:
-            mod.REQUESTS_AVAILABLE = False
+            mod.HTTPX_AVAILABLE = False
             from scripts.generate_image import topaz_enhance_image
 
             result = topaz_enhance_image(inp)
         finally:
-            mod.REQUESTS_AVAILABLE = original
+            mod.HTTPX_AVAILABLE = original
 
         assert result is None
-        # The "requests not available" message was migrated from stdout to
-        # stderr alongside the size-limit error paths.
+        # The "httpx not available" message goes to stderr alongside the
+        # size-limit error paths.
         err = capsys.readouterr().err
-        assert "requests" in err.lower()
+        assert "httpx" in err.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -297,8 +297,8 @@ class TestHappyPath:
         post_mock, get_mock = _happy_path_mocks()
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
         ):
             from scripts.generate_image import topaz_enhance_image
 
@@ -321,8 +321,8 @@ class TestHappyPath:
         post_mock, get_mock = _happy_path_mocks()
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
         ):
             from scripts.generate_image import topaz_enhance_image
 
@@ -369,8 +369,8 @@ class TestPoll429Retry:
         )
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
         ):
             from scripts.generate_image import topaz_enhance_image
 
@@ -408,8 +408,8 @@ class TestPollingTimeout:
         get_mock = MagicMock(return_value=pending_resp)
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
         ):
             from scripts.generate_image import topaz_enhance_image
 
@@ -444,8 +444,8 @@ class TestFailedStatus:
         get_mock = MagicMock(return_value=failed_resp)
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
         ):
             from scripts.generate_image import topaz_enhance_image
 
@@ -477,7 +477,7 @@ class TestMissingProcessId:
             return_value=_mock_response(json_data={}, text="unexpected response body")
         )
 
-        with patch("scripts.generate_image.requests.post", post_mock):
+        with patch("scripts.generate_image.httpx.post", post_mock):
             from scripts.generate_image import topaz_enhance_image
 
             result = topaz_enhance_image(inp)
@@ -514,7 +514,7 @@ class TestMalformedSubmitJson:
         bad_resp.json.side_effect = ValueError("invalid JSON")
         post_mock = MagicMock(return_value=bad_resp)
 
-        with patch("scripts.generate_image.requests.post", post_mock):
+        with patch("scripts.generate_image.httpx.post", post_mock):
             from scripts.generate_image import topaz_enhance_image
 
             result = topaz_enhance_image(inp)
@@ -561,8 +561,8 @@ class TestMalformedStatusJson:
         get_mock = MagicMock(return_value=bad_status_resp)
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
         ):
             from scripts.generate_image import topaz_enhance_image
 
@@ -609,8 +609,8 @@ class TestMalformedDownloadJson:
         get_mock = MagicMock(side_effect=[status_resp, dl_url_resp])
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
         ):
             from scripts.generate_image import topaz_enhance_image
 
@@ -651,8 +651,8 @@ class TestMissingDownloadUrl:
         get_mock = MagicMock(side_effect=[status_resp, dl_url_resp])
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
         ):
             from scripts.generate_image import topaz_enhance_image
 
@@ -689,8 +689,8 @@ class TestSsrfDisallowedHostname:
         get_mock = MagicMock(side_effect=[status_resp, dl_url_resp])
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
         ):
             from scripts.generate_image import topaz_enhance_image
 
@@ -731,8 +731,8 @@ class TestSsrfHttpScheme:
         get_mock = MagicMock(side_effect=[status_resp, dl_url_resp])
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
         ):
             from scripts.generate_image import topaz_enhance_image
 
@@ -744,7 +744,7 @@ class TestSsrfHttpScheme:
 
 
 # ---------------------------------------------------------------------------
-# allow_redirects=False is passed to image download
+# follow_redirects=False is passed to image download
 # ---------------------------------------------------------------------------
 
 
@@ -763,16 +763,17 @@ class TestAllowRedirectsFalse:
         post_mock, get_mock = _happy_path_mocks()
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
         ):
             from scripts.generate_image import topaz_enhance_image
 
             topaz_enhance_image(inp, output_path=out_path)
 
-        # The third GET call is the image download
+        # The third GET call is the image download. httpx uses
+        # ``follow_redirects=False`` (defaults to False, but explicit is best).
         img_download_call = get_mock.call_args_list[2]
-        assert img_download_call.kwargs.get("allow_redirects") is False
+        assert img_download_call.kwargs.get("follow_redirects") is False
 
 
 # ---------------------------------------------------------------------------
@@ -795,8 +796,8 @@ class TestEmptyImageBytes:
         post_mock, get_mock = _happy_path_mocks(image_bytes=b"")
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
         ):
             from scripts.generate_image import topaz_enhance_image
 
@@ -828,8 +829,8 @@ class TestDiskWriteFailure:
         post_mock, get_mock = _happy_path_mocks()
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
             patch(
                 "builtins.open",
                 side_effect=[
@@ -871,8 +872,8 @@ class TestExtensionMismatch:
         post_mock, get_mock = _happy_path_mocks(image_bytes=_PNG_MAGIC)
 
         with (
-            patch("scripts.generate_image.requests.post", post_mock),
-            patch("scripts.generate_image.requests.get", get_mock),
+            patch("scripts.generate_image.httpx.post", post_mock),
+            patch("scripts.generate_image.httpx.get", get_mock),
         ):
             from scripts.generate_image import topaz_enhance_image
 

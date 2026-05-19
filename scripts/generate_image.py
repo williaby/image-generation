@@ -62,15 +62,26 @@ Usage:
 
 import argparse
 import base64
-import os
+import logging
 import re
 import secrets
 import stat
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
+
+import httpx
+import structlog
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Compatibility shim for the ``datetime.UTC`` constant. Python 3.11 added
+# ``datetime.UTC`` as an alias for ``datetime.timezone.utc``; we target
+# 3.10+, so use the older spelling and expose ``UTC`` here for the rest of
+# the module to import.
+UTC = timezone.utc
 
 # Hard cap on reference / enhancement input image size. 4K PNGs are ~10 MiB;
 # 100 MiB is generous and protects against pathological local inputs that would
@@ -79,27 +90,107 @@ from urllib.parse import urlparse
 # are held simultaneously before the API call.
 MAX_INPUT_IMAGE_BYTES = 100 * 1024 * 1024
 
-GENAI_AVAILABLE = True
+# ``google-genai`` is a hard dependency declared in pyproject.toml, but tests
+# in CI environments sometimes install it lazily. The try/except preserves
+# the legacy ``GENAI_AVAILABLE`` runtime flag (used by tests that simulate
+# the "module missing" path) without forcing the runtime import to be
+# conditional in the type checker's view.
+genai: Any
+types: Any
 try:
-    from google import genai
-    from google.genai import types
+    from google import genai as _genai_runtime
+    from google.genai import types as _types_runtime
+
+    genai = _genai_runtime
+    types = _types_runtime
+    _genai_imported = True
 except ImportError:
-    GENAI_AVAILABLE = False
     genai = None
     types = None
+    _genai_imported = False
 
-REQUESTS_AVAILABLE = True
-try:
-    import requests
-except ImportError:
-    REQUESTS_AVAILABLE = False
-    requests = None
+GENAI_AVAILABLE: bool = _genai_imported
+
+# httpx is a hard dependency; this flag remains for tests that exercise the
+# "library missing" guard path inside ``topaz_enhance_image``. Setting the
+# flag to False at runtime via monkeypatch triggers the same code path that a
+# missing import would.
+HTTPX_AVAILABLE: bool = True
+
+# Backwards-compatible alias retained so that downstream code or tests written
+# against the legacy ``REQUESTS_AVAILABLE`` flag continue to work. ``requests``
+# itself is no longer imported; ``httpx`` is the canonical HTTP client.
+REQUESTS_AVAILABLE: bool = HTTPX_AVAILABLE
+
+
+class _StderrLogger:
+    """structlog logger that always writes to the current ``sys.stderr``.
+
+    ``structlog.PrintLogger`` and ``WriteLogger`` capture their file handle at
+    construction. Pytest's ``capsys`` replaces ``sys.stderr`` after import,
+    which would leave a captured handle pointing at the original (unwatched)
+    stream. Resolving the stream at call time is the simplest way to keep
+    structured logging without breaking ``capsys`` based assertions.
+    """
+
+    def msg(self, message: str) -> None:
+        print(message, file=sys.stderr)
+
+    log = msg
+    debug = msg
+    info = msg
+    warning = msg
+    warn = msg
+    error = msg
+    err = msg
+    critical = msg
+    fatal = msg
+    exception = msg
+
+
+class _StderrLoggerFactory:
+    """Factory returning the shared :class:`_StderrLogger` instance."""
+
+    _logger = _StderrLogger()
+
+    def __call__(self, *args: object, **kwargs: object) -> _StderrLogger:
+        return self._logger
+
+
+def _configure_logging(verbose: bool = False) -> None:
+    """Configure structlog for human-readable stderr output.
+
+    Rendered with ``ConsoleRenderer`` (colors off so tests parsing
+    ``capsys.readouterr().err`` see plain text). The stream is resolved at
+    call time via :class:`_StderrLogger`, so test harnesses that redirect
+    ``sys.stderr`` after import still observe log output.
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    structlog.configure(
+        processors=[
+            structlog.stdlib.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.dev.ConsoleRenderer(colors=False),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+        logger_factory=_StderrLoggerFactory(),
+        cache_logger_on_first_use=False,
+    )
+
+
+# Configure once at import so module-level callers get a working logger;
+# ``_run`` re-configures after parsing ``--verbose``.
+_configure_logging(verbose=False)
+log = structlog.get_logger(__name__)
 
 
 # Model configurations
 # Each entry carries its own aspect_ratios / image_sizes because the three
-# Gemini image models accept different sets.
-MODELS = {
+# Gemini image models accept different sets. Heterogeneous values are typed
+# as ``Any`` so the static checker does not treat ``MODELS[key]["foo"]`` as a
+# concrete union; per-call site checks (e.g. ``if not supports_image_config``)
+# operate on the values directly.
+MODELS: dict[str, dict[str, Any]] = {
     "flash": {
         "id": "gemini-2.5-flash-image",
         "name": "Nano Banana (Gemini 2.5 Flash)",
@@ -116,8 +207,20 @@ MODELS = {
         "supports_image_config": True,
         "supports_thinking_config": True,
         "aspect_ratios": [
-            "1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3",
-            "4:5", "5:4", "8:1", "9:16", "16:9", "21:9",
+            "1:1",
+            "1:4",
+            "1:8",
+            "2:3",
+            "3:2",
+            "3:4",
+            "4:1",
+            "4:3",
+            "4:5",
+            "5:4",
+            "8:1",
+            "9:16",
+            "16:9",
+            "21:9",
         ],
         "image_sizes": ["512", "1K", "2K", "4K"],
     },
@@ -218,37 +321,105 @@ TOPAZ_MODELS = {
 DEFAULT_TOPAZ_MODEL = "Standard V2"
 
 
+# Repo-root .env path used by ``Settings``. Resolved at module import; the
+# pydantic-settings loader reads the file lazily when ``Settings()`` is
+# instantiated, not at import time.
+_ENV_FILE = Path(__file__).parent.parent / ".env"
+
+
+class Settings(BaseSettings):
+    """Project settings loaded from environment variables and ``.env``.
+
+    Environment variables always take precedence over values in the .env file.
+    Both keys are optional at construction time so that tests, CLI subcommands
+    that do not need either key (``--list-models``), and standalone Topaz
+    enhancement (which needs only ``TOPAZ_API_KEY``) work without forcing the
+    other variable to be present. The CLI entry-point still raises
+    ``ConfigError`` via ``get_api_key()`` when the Gemini key is required but
+    unset, preserving the historical exit-on-missing-key UX.
+    """
+
+    GEMINI_API_KEY: str | None = None
+    TOPAZ_API_KEY: str | None = None
+
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE),
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=True,
+    )
+
+
+def get_settings() -> Settings:
+    """Return a fresh ``Settings`` instance.
+
+    A fresh instance is returned on every call so that tests that mutate the
+    process environment with ``monkeypatch.setenv`` / ``monkeypatch.delenv``
+    observe their changes without having to invalidate a cache.
+    """
+    return Settings()
+
+
+# ---------------------------------------------------------------------------
+# Typed exception hierarchy
+# ---------------------------------------------------------------------------
+
+
+class AppError(Exception):
+    """Base for all expected, user-visible failures in this CLI.
+
+    ``main()`` catches ``AppError`` and produces a clean stderr message + an
+    exit code of 1, instead of a Python traceback. Any subclass implies the
+    failure is part of normal operation (missing config, upstream API error,
+    bad file I/O); programmer bugs should raise ordinary exceptions and
+    surface as tracebacks via the outermost ``except Exception`` safety net.
+    """
+
+
+class ConfigError(AppError):
+    """Configuration is missing or malformed (e.g. unset GEMINI_API_KEY)."""
+
+
+class GeminiAPIError(AppError):
+    """The Gemini API returned an error or unparseable response."""
+
+
+class TopazAPIError(AppError):
+    """The Topaz Labs API returned an error or unparseable response."""
+
+
+class FileIOError(AppError):
+    """An expected file write or read failed (e.g. output directory unwritable)."""
+
+
 def _load_api_key(env_var: str) -> str | None:
-    """Load an API key from the environment or the repo-root .env file."""
-    api_key = os.environ.get(env_var)
-    if not api_key:
-        env_file = Path(__file__).parent.parent / ".env"
-        if env_file.exists():
-            try:
-                with open(env_file, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith(f"{env_var}="):
-                            api_key = (
-                                line.split("=", 1)[1].strip().strip('"').strip("'")
-                            )
-                            break
-            except OSError as exc:
-                print(
-                    f"Warning: could not read {env_file}: {exc}",
-                    file=sys.stderr,
-                )
-    return api_key or None
+    """Load an API key from the environment or the repo-root .env file.
+
+    Thin wrapper around :class:`Settings` retained for backwards compatibility
+    with callers and tests that patch ``scripts.generate_image._load_api_key``.
+    Only ``GEMINI_API_KEY`` and ``TOPAZ_API_KEY`` are recognised; other names
+    return ``None``.
+    """
+    settings = get_settings()
+    value = getattr(settings, env_var, None)
+    return value or None
 
 
 def get_api_key() -> str:
-    """Get the Gemini API key from environment."""
+    """Get the Gemini API key from environment or .env.
+
+    Raises ``ConfigError`` if the key is missing; ``main()`` catches this and
+    exits with code 1 after printing the message to stderr. The RAD
+    ``#CRITICAL`` tag in CLAUDE.md asserts this exit-on-missing-key behavior
+    is preserved.
+    """
     api_key = _load_api_key("GEMINI_API_KEY")
     if not api_key:
-        print("Error: GEMINI_API_KEY environment variable not set.")
-        print("Set it with: export GEMINI_API_KEY='your-api-key'")
-        print("Or create a .env file in the repository root.")
-        sys.exit(1)
+        raise ConfigError(
+            "GEMINI_API_KEY environment variable not set.\n"
+            "Set it with: export GEMINI_API_KEY='your-api-key'\n"
+            "Or create a .env file in the repository root."
+        )
     return api_key
 
 
@@ -256,10 +427,10 @@ def get_topaz_api_key() -> str | None:
     """Get the Topaz Labs API key from environment or .env file."""
     api_key = _load_api_key("TOPAZ_API_KEY")
     if not api_key:
-        print("Error: TOPAZ_API_KEY not set.", file=sys.stderr)
-        print("Set it with: export TOPAZ_API_KEY='your-api-key'", file=sys.stderr)
-        print("Or add it to the .env file in the repository root.", file=sys.stderr)
-        print("Get a key at: https://developer.topazlabs.com", file=sys.stderr)
+        log.error("Error: TOPAZ_API_KEY not set.")
+        log.error("Set it with: export TOPAZ_API_KEY='your-api-key'")
+        log.error("Or add it to the .env file in the repository root.")
+        log.error("Get a key at: https://developer.topazlabs.com")
     return api_key
 
 
@@ -279,12 +450,9 @@ def topaz_enhance_image(
     Precision models (Gigapixel family): 24 MP per credit.
     Generative models (Wonder, Bloom): 2-4 MP per credit, significantly more expensive.
     """
-    if not REQUESTS_AVAILABLE:
-        print(
-            "Error: 'requests' package is required for Topaz enhancement.",
-            file=sys.stderr,
-        )
-        print("Install with: pip install requests", file=sys.stderr)
+    if not HTTPX_AVAILABLE:
+        log.error("Error: 'httpx' package is required for Topaz enhancement.")
+        log.error("Install with: pip install httpx")
         return None
 
     api_key = get_topaz_api_key()
@@ -300,46 +468,39 @@ def topaz_enhance_image(
     try:
         resolved_stat = input_path.resolve().stat()
     except FileNotFoundError:
-        print(f"Error: Input image not found: {input_path}", file=sys.stderr)
+        log.error(f"Error: Input image not found: {input_path}")
         return None
     except OSError as e:
-        print(f"Error: Cannot stat input image {input_path}: {e}", file=sys.stderr)
+        log.error(f"Error: Cannot stat input image {input_path}: {e}")
         return None
     if not stat.S_ISREG(resolved_stat.st_mode):
-        print(
-            f"Error: Input image {input_path} is not a regular file.",
-            file=sys.stderr,
-        )
+        log.error(f"Error: Input image {input_path} is not a regular file.")
         return None
     input_size = resolved_stat.st_size
     if input_size > MAX_INPUT_IMAGE_BYTES:
-        print(
+        log.error(
             f"Error: Input image {input_path} is {input_size} bytes; "
-            f"exceeds limit of {MAX_INPUT_IMAGE_BYTES} bytes.",
-            file=sys.stderr,
+            f"exceeds limit of {MAX_INPUT_IMAGE_BYTES} bytes."
         )
         return None
 
     model_config = TOPAZ_MODELS.get(model)
     if model_config is None:
-        print(f"Error: Unknown Topaz model '{model}'.", file=sys.stderr)
-        print(f"Available: {', '.join(TOPAZ_MODELS)}", file=sys.stderr)
+        log.error(f"Error: Unknown Topaz model '{model}'.")
+        log.error(f"Available: {', '.join(TOPAZ_MODELS)}")
         return None
 
     valid_formats = ("png", "jpg", "jpeg", "webp")
     if output_format not in valid_formats:
-        print(
-            f"Error: output_format must be one of {valid_formats}, got '{output_format}'",
-            file=sys.stderr,
+        log.error(
+            f"Error: output_format must be one of {valid_formats}, "
+            f"got '{output_format}'"
         )
         return None
 
     def _check_strength(name: str, value: float | None) -> bool:
         if value is not None and not (0.0 <= value <= 1.0):
-            print(
-                f"Error: {name} must be between 0.0 and 1.0, got {value}",
-                file=sys.stderr,
-            )
+            log.error(f"Error: {name} must be between 0.0 and 1.0, got {value}")
             return False
         return True
 
@@ -353,16 +514,15 @@ def topaz_enhance_image(
         return None
 
     if face_enhancement_strength is not None and not face_enhancement:
-        print(
-            "Error: --topaz-face-strength requires --topaz-face-enhance to be set.",
-            file=sys.stderr,
+        log.error(
+            "Error: --topaz-face-strength requires --topaz-face-enhance to be set."
         )
         return None
 
     # #CRITICAL: API key sent as X-API-KEY header; never log headers containing this value.
     # #VERIFY   -- Audit log handler config before enabling debug logging.
     # #ASSUME: Topaz API at TOPAZ_BASE_URL accepts multipart/form-data for all model endpoints.
-    # #VERIFY   -- Check developer.topazlabs.com changelog before upgrading requests.
+    # #VERIFY   -- Check developer.topazlabs.com changelog before upgrading httpx.
     _TOPAZ_DOWNLOAD_HOSTS = frozenset({"api.topazlabs.com", "cdn.topazlabs.com"})
     headers = {"X-API-KEY": api_key}
     endpoint_url = f"{TOPAZ_BASE_URL}/{model_config['endpoint']}"
@@ -380,14 +540,19 @@ def topaz_enhance_image(
         if face_enhancement_strength is not None:
             data["face_enhancement_strength"] = face_enhancement_strength
 
-    # Submit async job. Narrowing: catch network errors (RequestException
-    # covers timeouts, HTTP errors, connection failures) and the parsing-
+    # Submit async job. Narrowing: catch network errors (httpx.HTTPError
+    # covers timeouts, HTTP status errors, transport failures) and the parsing-
     # adjacent ValueError / KeyError that arises from a malformed response
     # body. Other exceptions (KeyboardInterrupt, MemoryError, programmer
     # bugs) should propagate.
+    #
+    # ``resp`` is declared above the try/except so the static checker sees it
+    # as bound in the ValueError handler even if ``httpx.post`` is the call
+    # that raised.
+    resp: httpx.Response | None = None
     try:
         with open(input_path, "rb") as f:
-            resp = requests.post(
+            resp = httpx.post(
                 endpoint_url,
                 headers=headers,
                 data=data,
@@ -396,45 +561,42 @@ def topaz_enhance_image(
             )
         resp.raise_for_status()
         submit_payload = resp.json()
-    except requests.RequestException as e:
-        print(f"Error submitting Topaz job (transport): {e}", file=sys.stderr)
+    except httpx.HTTPError as e:
+        log.error(f"Error submitting Topaz job (transport): {e}")
         return None
     except ValueError as e:
         # `resp.json()` raised on a 200-or-redirected response whose body is
-        # not valid JSON. `resp` is guaranteed bound here because
-        # `raise_for_status()` ran first, so include the status and body
-        # snippet to disambiguate "Topaz returned HTML error page with 200
-        # status" from "Topaz returned a transient parse failure".
-        print(
+        # not valid JSON. ``raise_for_status`` ran first, so ``resp`` is
+        # guaranteed bound to a non-None value here.
+        assert resp is not None  # noqa: S101 - control-flow narrowing for type checker
+        log.error(
             f"Error: Topaz submit returned non-JSON body "
             f"(status={resp.status_code}): {e}; "
-            f"body[:200]={resp.text[:200]!r}",
-            file=sys.stderr,
+            f"body[:200]={resp.text[:200]!r}"
         )
         return None
     except OSError as e:
-        print(f"Error reading Topaz input file: {e}", file=sys.stderr)
+        log.error(f"Error reading Topaz input file: {e}")
         return None
+    assert resp is not None  # noqa: S101 - narrowing after successful POST
 
     if not isinstance(submit_payload, dict):
         # Defend against a top-level JSON value that is not a JSON object
         # (array, scalar, `null`); `.get(...)` would raise `AttributeError`
         # which is not in any catch clause above.
-        print(
+        log.error(
             f"Error: Topaz submit response was not a JSON object "
             f"(got {type(submit_payload).__name__}): "
-            f"body[:200]={resp.text[:200]!r}",
-            file=sys.stderr,
+            f"body[:200]={resp.text[:200]!r}"
         )
         return None
 
     process_id = submit_payload.get("process_id")
     if not process_id:
-        print(
+        log.error(
             f"Error: Topaz API returned unexpected response "
             f"(missing process_id, keys={sorted(submit_payload)[:10]}): "
-            f"{resp.text[:200]}",
-            file=sys.stderr,
+            f"{resp.text[:200]}"
         )
         return None
     if verbose:
@@ -448,7 +610,7 @@ def topaz_enhance_image(
     for _ in range(25):
         time.sleep(wait)
         try:
-            status_resp = requests.get(
+            status_resp = httpx.get(
                 f"{TOPAZ_BASE_URL}/status/{process_id}",
                 headers=headers,
                 timeout=15,
@@ -458,17 +620,13 @@ def topaz_enhance_image(
                 continue
             status_resp.raise_for_status()
             status_payload = status_resp.json()
-        except (requests.RequestException, ValueError) as e:
-            print(
-                f"Error polling Topaz status for job {process_id}: {e}",
-                file=sys.stderr,
-            )
+        except (httpx.HTTPError, ValueError) as e:
+            log.error(f"Error polling Topaz status for job {process_id}: {e}")
             return None
         if not isinstance(status_payload, dict):
-            print(
+            log.error(
                 f"Error: Topaz status response for job {process_id} was "
-                f"not a JSON object (got {type(status_payload).__name__})",
-                file=sys.stderr,
+                f"not a JSON object (got {type(status_payload).__name__})"
             )
             return None
         status = status_payload.get("status", "")
@@ -477,87 +635,71 @@ def topaz_enhance_image(
         if status == "Completed":
             break
         if status in ("Failed", "Error"):
-            print(
-                f"Error: Topaz job {process_id} failed (status: {status})",
-                file=sys.stderr,
-            )
+            log.error(f"Error: Topaz job {process_id} failed (status: {status})")
             return None
         wait = min(wait * 1.5, 15)
     else:
-        print(
-            f"Error: Topaz job {process_id} did not complete within the polling limit.",
-            file=sys.stderr,
+        log.error(
+            f"Error: Topaz job {process_id} did not complete within the polling limit."
         )
         return None
 
     # Get download URL
+    dl_resp: httpx.Response | None = None
     try:
-        dl_resp = requests.get(
+        dl_resp = httpx.get(
             f"{TOPAZ_BASE_URL}/download/{process_id}",
             headers=headers,
             timeout=15,
         )
         dl_resp.raise_for_status()
         dl_payload = dl_resp.json()
-    except requests.RequestException as e:
-        print(
-            f"Error getting Topaz download URL for job {process_id} (transport): {e}",
-            file=sys.stderr,
+    except httpx.HTTPError as e:
+        log.error(
+            f"Error getting Topaz download URL for job {process_id} (transport): {e}"
         )
         return None
     except ValueError as e:
-        print(
+        assert dl_resp is not None  # noqa: S101 - narrowing for type checker
+        log.error(
             f"Error: Topaz download URL response was non-JSON for job "
             f"{process_id} (status={dl_resp.status_code}): {e}; "
-            f"body[:200]={dl_resp.text[:200]!r}",
-            file=sys.stderr,
+            f"body[:200]={dl_resp.text[:200]!r}"
         )
         return None
+    assert dl_resp is not None  # noqa: S101 - narrowing after successful GET
 
     if not isinstance(dl_payload, dict):
-        print(
+        log.error(
             f"Error: Topaz download URL response for job {process_id} was "
             f"not a JSON object (got {type(dl_payload).__name__}): "
-            f"body[:200]={dl_resp.text[:200]!r}",
-            file=sys.stderr,
+            f"body[:200]={dl_resp.text[:200]!r}"
         )
         return None
 
     download_url = dl_payload.get("url")
     if not download_url:
-        print(
-            f"Error: Topaz download response missing URL for job {process_id}",
-            file=sys.stderr,
-        )
+        log.error(f"Error: Topaz download response missing URL for job {process_id}")
         return None
 
     # #ASSUME: download_url is a valid HTTPS URL served from api.topazlabs.com or its CDN.
     # #VERIFY   -- Check Topaz CDN policy if infrastructure change announced.
     _parsed = urlparse(download_url)
     if _parsed.scheme != "https" or _parsed.hostname not in _TOPAZ_DOWNLOAD_HOSTS:
-        print(
-            f"Error: Topaz returned unexpected download URL: {download_url!r}",
-            file=sys.stderr,
-        )
+        log.error(f"Error: Topaz returned unexpected download URL: {download_url!r}")
         return None
 
     # Download the enhanced image
     try:
-        img_resp = requests.get(download_url, timeout=120, allow_redirects=False)
+        img_resp = httpx.get(download_url, timeout=120, follow_redirects=False)
         img_resp.raise_for_status()
         image_data = img_resp.content
-    except requests.RequestException as e:
-        print(
-            f"Error downloading Topaz result for job {process_id}: {e}",
-            file=sys.stderr,
-        )
+    except httpx.HTTPError as e:
+        log.error(f"Error downloading Topaz result for job {process_id}: {e}")
         return None
 
     if not image_data:
-        print(
-            f"Error: Topaz download returned empty response for job {process_id}",
-            file=sys.stderr,
-        )
+        log.error(f"Error: Topaz download returned empty response for job {process_id}")
         return None
 
     # Resolve output path
@@ -571,10 +713,9 @@ def topaz_enhance_image(
         if user_ext not in (".png", ".jpg", ".jpeg", ".webp"):
             output_path = output_path.with_suffix(detected_ext)
         elif user_ext != detected_ext:
-            print(
-                f"Warning: specified extension {user_ext!r} does not match Topaz result"
-                f" {detected_ext!r}; correcting.",
-                file=sys.stderr,
+            log.warning(
+                f"Warning: specified extension {user_ext!r} does not match "
+                f"Topaz result {detected_ext!r}; correcting."
             )
             output_path = output_path.with_suffix(detected_ext)
 
@@ -583,7 +724,7 @@ def topaz_enhance_image(
         with open(output_path, "wb") as f:
             f.write(image_data)
     except OSError as e:
-        print(f"Error writing output file {output_path}: {e}", file=sys.stderr)
+        log.error(f"Error writing output file {output_path}: {e}")
         return None
 
     print(f"Topaz result saved to: {output_path}")
@@ -865,10 +1006,7 @@ def generate_image(
             try:
                 img_data, mime_type = load_image_as_base64(img_path)
             except (ValueError, OSError) as exc:
-                print(
-                    f"Error: cannot load reference image {img_path}: {exc}",
-                    file=sys.stderr,
-                )
+                log.error(f"Error: cannot load reference image {img_path}: {exc}")
                 return None
             contents.append(
                 types.Part.from_bytes(
@@ -880,8 +1018,10 @@ def generate_image(
     # Add the text prompt
     contents.append(prompt)
 
-    # Build config kwargs
-    config_kwargs = {
+    # Build config kwargs (heterogeneous: lists, dicts, model objects,
+    # bools). Annotated as ``dict[str, Any]`` so the static checker does not
+    # constrain later assignments to the initial value's type.
+    config_kwargs: dict[str, Any] = {
         "response_modalities": ["IMAGE", "TEXT"],
     }
 
@@ -1120,12 +1260,19 @@ def generate_image(
                     else:
                         output_path = script_dir / "output" / output_path.name
 
-            # Ensure output directory exists
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Write image
-            with open(output_path, "wb") as f:
-                f.write(final_image_data)
+            # Ensure output directory exists and write the image. OSError
+            # here means a real disk-side failure (full disk, permission
+            # denied, missing parent on a read-only mount) -- surface as
+            # ``FileIOError`` rather than the generic ``GeminiAPIError`` so
+            # the user sees an accurate diagnosis.
+            try:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(output_path, "wb") as f:
+                    f.write(final_image_data)
+            except OSError as exc:
+                raise FileIOError(
+                    f"Failed to write image to {output_path}: {exc}"
+                ) from exc
 
             if thought_count > 0:
                 print(f"\nProcessed {thought_count} thought step(s)")
@@ -1163,10 +1310,9 @@ def generate_image(
                         is_final=is_final_image,
                     )
                 except OSError as exc:
-                    print(
+                    log.warning(
                         f"Warning: image saved to {output_path} but PROMPTS.md "
-                        f"update failed: {exc}",
-                        file=sys.stderr,
+                        f"update failed: {exc}"
                     )
 
             return output_path
@@ -1174,11 +1320,18 @@ def generate_image(
         print("Error: No image data in response.")
         return None
 
+    except AppError:
+        # Already a typed application error; propagate so ``main()`` produces
+        # the canonical stderr message + nonzero exit.
+        raise
     except Exception as e:
-        print(f"Error generating image: {e}")
+        # Wrap any SDK-side or response-parsing failure as ``GeminiAPIError``
+        # so the CLI presents a single, consistent error class. The original
+        # exception is chained for debugging via ``__cause__``.
+        msg = f"Error generating image: {e}"
         if "API_KEY" in str(e).upper():
-            print("Check that your GEMINI_API_KEY is valid.")
-        return None
+            msg = f"{msg}\nCheck that your GEMINI_API_KEY is valid."
+        raise GeminiAPIError(msg) from e
 
 
 def generate_story_sequence(
@@ -1293,8 +1446,11 @@ def list_models():
         print()
 
 
-def main():
-    """Main entry point."""
+def _run() -> None:
+    """CLI body. Raises ``AppError`` for expected failures and ``SystemExit``
+    for terminal cases; :func:`main` is the user-facing entry point that
+    translates ``AppError`` to a clean stderr message + exit code 1.
+    """
     parser = argparse.ArgumentParser(
         description="Generate images using Google Gemini (Nano Banana / Nano Banana 2 / Nano Banana Pro)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1479,6 +1635,9 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # Reconfigure structlog now that we know the verbosity flag.
+    _configure_logging(verbose=bool(args.verbose))
 
     if args.list_models:
         list_models()
@@ -1711,6 +1870,29 @@ Examples:
             print(f"{'=' * 60}")
 
         sys.exit(0 if result else 1)
+
+
+def main() -> None:
+    """User-facing CLI entry point.
+
+    Catches :class:`AppError` (configuration, Gemini, Topaz, file I/O) and
+    surfaces a clean stderr message plus exit code 1, instead of a Python
+    traceback. The outermost ``except Exception`` is the safety net for
+    truly unexpected bugs: it still prints + exits, but with a different
+    prefix so users can distinguish "expected failure" from "this is a
+    bug, please report it".
+    """
+    try:
+        _run()
+    except AppError as exc:
+        log.error(f"Error: {exc}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        log.error("Interrupted.")
+        sys.exit(130)
+    except Exception as exc:
+        log.error(f"Unexpected error: {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

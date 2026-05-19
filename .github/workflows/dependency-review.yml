@@ -1,0 +1,32 @@
+# Dependency Review
+#
+# Standalone dependency-review workflow required by branch rulesets that
+# reference the dedicated workflow name. Runs the dependency-review-action
+# to surface newly introduced vulnerable dependencies on every PR.
+#
+# Note: security-analysis.yml also runs dependency review via the org reusable;
+# this file ensures the check is visible under its canonical workflow name.
+name: Dependency Review
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5  # v2.19.3
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@da24556b548a50705dd671f47852072ea4c105d9  # v4.7.1

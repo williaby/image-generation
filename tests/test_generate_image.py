@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -113,88 +113,86 @@ class TestGetExtensionForMime:
 
 
 # ---------------------------------------------------------------------------
-# Tier 2: _load_api_key() -- file I/O with tmp_path
+# Tier 2: Settings / _load_api_key() -- pydantic-settings + .env loading
 # ---------------------------------------------------------------------------
 
 
 class TestLoadApiKey:
-    """_load_api_key() reads from env first, then falls back to a .env file."""
+    """_load_api_key() reads from env first, then falls back to a .env file.
+
+    Implementation is now a thin wrapper around the ``Settings`` pydantic
+    BaseSettings class; only the known variables (GEMINI_API_KEY,
+    TOPAZ_API_KEY) are recognised. The legacy "any env var name" interface
+    is no longer supported.
+    """
 
     def test_returns_key_from_environment(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         from scripts.generate_image import _load_api_key
 
-        monkeypatch.setenv("MY_TEST_KEY", "env-value-123")
-        result = _load_api_key("MY_TEST_KEY")
+        # Isolate from any project .env on disk by repointing the env_file.
+        monkeypatch.setattr("scripts.generate_image._ENV_FILE", tmp_path / ".no-env")
+        monkeypatch.setenv("GEMINI_API_KEY", "env-value-123")
+        result = _load_api_key("GEMINI_API_KEY")
         assert result == "env-value-123"
 
     def test_returns_none_when_neither_env_nor_file(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         from scripts.generate_image import _load_api_key
 
-        monkeypatch.delenv("MY_MISSING_KEY", raising=False)
-        # Point __file__ parent.parent somewhere that has no .env
-        with patch("scripts.generate_image.Path") as mock_path_cls:
-            # Make env_file.exists() return False
-            env_file_mock = MagicMock()
-            env_file_mock.exists.return_value = False
-            # __file__.parent.parent / ".env" chain
-            mock_path_cls.return_value.__truediv__.return_value = env_file_mock
-            result = _load_api_key("MY_MISSING_KEY")
-
+        monkeypatch.setattr("scripts.generate_image._ENV_FILE", tmp_path / ".no-env")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        result = _load_api_key("GEMINI_API_KEY")
         assert result is None
 
     def test_reads_key_from_dot_env_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Key absent from env but present in a .env file next to the repo root."""
+        """Key absent from env but present in a .env file is read."""
         from scripts.generate_image import _load_api_key
 
-        monkeypatch.delenv("DOTENV_TEST_KEY", raising=False)
+        monkeypatch.delenv("TOPAZ_API_KEY", raising=False)
 
-        # Write a fake .env file
         env_file = tmp_path / ".env"
-        env_file.write_text('DOTENV_TEST_KEY="file-value-456"\n', encoding="utf-8")
+        env_file.write_text('TOPAZ_API_KEY="file-value-456"\n', encoding="utf-8")
+        monkeypatch.setattr("scripts.generate_image._ENV_FILE", env_file)
 
-        # Direct approach: patch builtins.open and Path.exists
-        real_open = open
+        # ``Settings`` is re-instantiated on every call via ``get_settings()``;
+        # patching the module-level _ENV_FILE is enough for the read to pick up
+        # the temporary file.
+        from scripts.generate_image import Settings, SettingsConfigDict
 
-        def fake_open(path: Any, *args: Any, **kwargs: Any) -> Any:
-            return real_open(env_file, *args, **kwargs)
+        # Re-bind Settings.model_config to point at the temp .env. pydantic
+        # captures the path at class construction; we shadow the env_file
+        # config so the temp path is used.
+        monkeypatch.setattr(
+            Settings,
+            "model_config",
+            SettingsConfigDict(
+                env_file=str(env_file),
+                env_file_encoding="utf-8",
+                extra="ignore",
+                case_sensitive=True,
+            ),
+        )
 
-        with (
-            patch("scripts.generate_image.Path") as mock_path_cls2,
-        ):
-            env_file_mock2 = MagicMock()
-            env_file_mock2.exists.return_value = True
-            # When open() is called on env_file_mock2, forward to the real file
-            env_file_mock2.__str__ = Mock(return_value=str(env_file))
-            mock_path_cls2.return_value.parent.parent.__truediv__.return_value = (
-                env_file_mock2
-            )
-            with patch("builtins.open", side_effect=fake_open):
-                result = _load_api_key("DOTENV_TEST_KEY")
-
+        result = _load_api_key("TOPAZ_API_KEY")
         assert result == "file-value-456"
 
-    def test_returns_none_when_env_file_raises_oserror(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_returns_none_when_env_file_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """If the .env file path does not exist, pydantic-settings silently
+        skips it and the key resolves to None when not in the environment."""
         from scripts.generate_image import _load_api_key
 
-        monkeypatch.delenv("OSERROR_TEST_KEY", raising=False)
-
-        with patch("scripts.generate_image.Path") as mock_path_cls:
-            env_file_mock = MagicMock()
-            env_file_mock.exists.return_value = True
-            mock_path_cls.return_value.parent.parent.__truediv__.return_value = (
-                env_file_mock
-            )
-            with patch("builtins.open", side_effect=OSError("permission denied")):
-                result = _load_api_key("OSERROR_TEST_KEY")
-
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "scripts.generate_image._ENV_FILE", tmp_path / "missing.env"
+        )
+        result = _load_api_key("GEMINI_API_KEY")
         assert result is None
 
     def test_returns_key_from_env_file_unquoted(
@@ -203,25 +201,26 @@ class TestLoadApiKey:
         """Keys without quotes in .env file are parsed correctly."""
         from scripts.generate_image import _load_api_key
 
-        monkeypatch.delenv("UNQUOTED_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
         env_file = tmp_path / ".env"
-        env_file.write_text("UNQUOTED_KEY=plain-value\n", encoding="utf-8")
+        env_file.write_text("GEMINI_API_KEY=plain-value\n", encoding="utf-8")
+        monkeypatch.setattr("scripts.generate_image._ENV_FILE", env_file)
 
-        real_open = open
+        from scripts.generate_image import Settings, SettingsConfigDict
 
-        def fake_open(path: Any, *args: Any, **kwargs: Any) -> Any:
-            return real_open(env_file, *args, **kwargs)
+        monkeypatch.setattr(
+            Settings,
+            "model_config",
+            SettingsConfigDict(
+                env_file=str(env_file),
+                env_file_encoding="utf-8",
+                extra="ignore",
+                case_sensitive=True,
+            ),
+        )
 
-        with patch("scripts.generate_image.Path") as mock_path_cls:
-            env_file_mock = MagicMock()
-            env_file_mock.exists.return_value = True
-            mock_path_cls.return_value.parent.parent.__truediv__.return_value = (
-                env_file_mock
-            )
-            with patch("builtins.open", side_effect=fake_open):
-                result = _load_api_key("UNQUOTED_KEY")
-
+        result = _load_api_key("GEMINI_API_KEY")
         assert result == "plain-value"
 
 
@@ -433,19 +432,40 @@ class TestGetApiKey:
 
         assert result == "gemini-test-key"
 
-    def test_raises_system_exit_when_key_absent(
+    def test_raises_config_error_when_key_absent(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from scripts.generate_image import get_api_key
+        """Post-refactor, the missing-key case raises ``ConfigError`` instead
+        of calling ``sys.exit`` directly. ``main()`` translates the exception
+        into exit code 1; the underlying CLI contract is preserved.
+        """
+        from scripts.generate_image import ConfigError, get_api_key
 
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         with (
             patch("scripts.generate_image._load_api_key", return_value=None),
-            pytest.raises(SystemExit) as exc_info,
+            pytest.raises(ConfigError) as exc_info,
         ):
             get_api_key()
 
+        assert "GEMINI_API_KEY" in str(exc_info.value)
+
+    def test_main_exits_with_code_1_when_key_absent(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """End-to-end: ``main()`` still exits with code 1 on missing key."""
+        from scripts.generate_image import main
+
+        monkeypatch.setattr("sys.argv", ["generate_image.py", "test prompt"])
+        with (
+            patch("scripts.generate_image._load_api_key", return_value=None),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
         assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "GEMINI_API_KEY" in err
 
 
 class TestGetTopazApiKey:
@@ -760,24 +780,25 @@ class TestGenerateImageEmptyCandidates:
 
 
 class TestGenerateImageApiKeyMissing:
-    """When get_api_key() raises SystemExit, it should propagate."""
+    """When get_api_key() raises ConfigError, it should propagate."""
 
-    def test_system_exit_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import scripts.generate_image as mod
+    def test_config_error_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from scripts import generate_image as mod
+        from scripts.generate_image import ConfigError
 
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
         with (
             patch("scripts.generate_image._load_api_key", return_value=None),
-            pytest.raises(SystemExit) as exc_info,
+            pytest.raises(ConfigError) as exc_info,
         ):
             mod.generate_image(
-                prompt="Should exit",
+                prompt="Should raise",
                 model_key="flash",
                 document_prompt=False,
             )
 
-        assert exc_info.value.code == 1
+        assert "GEMINI_API_KEY" in str(exc_info.value)
 
 
 class TestGenerateImageUnknownModel:
@@ -834,12 +855,18 @@ class TestGenerateImageNoImageData:
 
 
 class TestGenerateImageApiException:
-    """When generate_content() raises, the exception is caught and None returned."""
+    """When generate_content() raises, it is wrapped in ``GeminiAPIError``.
 
-    def test_api_exception_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    Post-refactor, the broad ``except Exception`` no longer prints + returns
+    ``None`` -- it re-raises as a typed application error. ``main()`` is the
+    layer that translates this to a clean stderr message + exit code 1.
+    """
+
+    def test_api_exception_raises_gemini_api_error(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import scripts.generate_image as mod
+        from scripts import generate_image as mod
+        from scripts.generate_image import GeminiAPIError
 
         monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
 
@@ -852,22 +879,23 @@ class TestGenerateImageApiException:
         with (
             patch("scripts.generate_image.genai.Client", mock_client_cls),
             patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+            pytest.raises(GeminiAPIError) as exc_info,
         ):
-            result = mod.generate_image(
+            mod.generate_image(
                 prompt="Exception test",
                 model_key="flash",
                 document_prompt=False,
             )
 
-        assert result is None
-        out = capsys.readouterr().out
-        assert "error" in out.lower()
+        assert "connection refused" in str(exc_info.value)
 
     def test_api_key_error_hints_at_api_key(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When the error message contains 'API_KEY', an extra hint is printed."""
-        import scripts.generate_image as mod
+        """When the upstream error message contains 'API_KEY', the wrapped
+        ``GeminiAPIError`` includes the hint about validating the env var."""
+        from scripts import generate_image as mod
+        from scripts.generate_image import GeminiAPIError
 
         monkeypatch.setenv("GEMINI_API_KEY", "bad-key")
 
@@ -880,16 +908,15 @@ class TestGenerateImageApiException:
         with (
             patch("scripts.generate_image.genai.Client", mock_client_cls),
             patch("scripts.generate_image._load_api_key", return_value="bad-key"),
+            pytest.raises(GeminiAPIError) as exc_info,
         ):
-            result = mod.generate_image(
+            mod.generate_image(
                 prompt="Bad key test",
                 model_key="flash",
                 document_prompt=False,
             )
 
-        assert result is None
-        out = capsys.readouterr().out
-        assert "gemini_api_key" in out.lower() or "api key" in out.lower()
+        assert "GEMINI_API_KEY" in str(exc_info.value)
 
 
 class TestGenerateImageDraftMode:
@@ -1764,88 +1791,68 @@ class TestGenerateStorySequence:
 
 
 class TestLoadApiKeySimple:
-    """Simple _load_api_key tests that just use environment variables."""
+    """Simple _load_api_key tests exercising the Settings backend.
+
+    Post-pydantic-settings, ``_load_api_key`` only resolves the known
+    ``GEMINI_API_KEY`` and ``TOPAZ_API_KEY`` variables. Unknown names return
+    ``None``.
+    """
 
     def test_returns_key_from_env_directly(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         from scripts.generate_image import _load_api_key
 
-        monkeypatch.setenv("DIRECT_ENV_KEY", "direct-value")
-        result = _load_api_key("DIRECT_ENV_KEY")
+        monkeypatch.setattr("scripts.generate_image._ENV_FILE", tmp_path / ".no-env")
+        monkeypatch.setenv("TOPAZ_API_KEY", "direct-value")
+        result = _load_api_key("TOPAZ_API_KEY")
         assert result == "direct-value"
 
     def test_returns_none_when_env_absent_and_no_env_file(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Key absent from env, .env file does not exist -> returns None."""
-        import scripts.generate_image as mod
+        from scripts.generate_image import _load_api_key
 
-        monkeypatch.delenv("ABSENT_KEY_XYZ", raising=False)
-        fake_script = tmp_path / "scripts" / "generate_image.py"
-        fake_script.parent.mkdir(parents=True, exist_ok=True)
-        # No .env file created; function should return None
-
-        with patch.object(mod, "__file__", str(fake_script)):
-            from scripts.generate_image import _load_api_key
-
-            result = _load_api_key("ABSENT_KEY_XYZ")
-
+        monkeypatch.setattr("scripts.generate_image._ENV_FILE", tmp_path / ".no-env")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        result = _load_api_key("GEMINI_API_KEY")
         assert result is None
 
     def test_reads_key_from_env_file_via_real_fs(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Key absent from env but .env file on disk contains it."""
-        import scripts.generate_image as mod
+        from scripts.generate_image import Settings, SettingsConfigDict, _load_api_key
 
-        monkeypatch.delenv("FS_ENV_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
-        # Create a .env file at tmp_path/.env
         env_file = tmp_path / ".env"
-        env_file.write_text("FS_ENV_KEY='fs-test-value'\n", encoding="utf-8")
+        env_file.write_text("GEMINI_API_KEY='fs-test-value'\n", encoding="utf-8")
+        monkeypatch.setattr("scripts.generate_image._ENV_FILE", env_file)
+        monkeypatch.setattr(
+            Settings,
+            "model_config",
+            SettingsConfigDict(
+                env_file=str(env_file),
+                env_file_encoding="utf-8",
+                extra="ignore",
+                case_sensitive=True,
+            ),
+        )
 
-        # Make the script's parent.parent point to tmp_path
-        # (_load_api_key resolves: Path(__file__).parent.parent / ".env")
-        fake_script = tmp_path / "scripts" / "generate_image.py"
-        fake_script.parent.mkdir(parents=True, exist_ok=True)
-
-        with patch.object(mod, "__file__", str(fake_script)):
-            from scripts.generate_image import _load_api_key
-
-            result = _load_api_key("FS_ENV_KEY")
-
+        result = _load_api_key("GEMINI_API_KEY")
         assert result == "fs-test-value"
 
-    def test_env_file_with_oserror_returns_none(
+    def test_unknown_env_var_returns_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """When .env exists but open() raises OSError, function returns None."""
-        import scripts.generate_image as mod
+        """Variables outside the Settings schema resolve to None."""
+        from scripts.generate_image import _load_api_key
 
-        monkeypatch.delenv("OSERR_KEY", raising=False)
-
-        fake_script = tmp_path / "scripts" / "generate_image.py"
-        fake_script.parent.mkdir(parents=True, exist_ok=True)
-        # Create a .env file so the exists() check passes
-        (tmp_path / ".env").write_text("OSERR_KEY=val\n", encoding="utf-8")
-
-        real_open = open
-
-        def oserror_open(path: Any, *a: Any, **kw: Any) -> Any:
-            if str(path).endswith(".env"):
-                raise OSError("permission denied")
-            return real_open(path, *a, **kw)
-
-        with (
-            patch.object(mod, "__file__", str(fake_script)),
-            patch("builtins.open", side_effect=oserror_open),
-        ):
-            from scripts.generate_image import _load_api_key
-
-            result = _load_api_key("OSERR_KEY")
-
-        assert result is None
+        monkeypatch.setattr("scripts.generate_image._ENV_FILE", tmp_path / ".no-env")
+        monkeypatch.setenv("ARBITRARY_OTHER_KEY", "ignored")
+        assert _load_api_key("ARBITRARY_OTHER_KEY") is None
 
 
 # ---------------------------------------------------------------------------
@@ -2894,9 +2901,7 @@ class TestPerModelAspectRatioValidation:
         # Stdout proves the validation branch accepted the value, but we also
         # need to prove it reached the SDK. Inspect the mocked generate_content
         # call to confirm the ImageConfig carries aspect_ratio="21:9".
-        config = mock_client_instance.models.generate_content.call_args.kwargs[
-            "config"
-        ]
+        config = mock_client_instance.models.generate_content.call_args.kwargs["config"]
         assert config.image_config is not None
         assert config.image_config.aspect_ratio == "21:9"
 
@@ -3187,9 +3192,7 @@ class TestThinkingLevelMinimalAndInvalid:
                 document_prompt=False,
             )
 
-        config = mock_client_instance.models.generate_content.call_args.kwargs[
-            "config"
-        ]
+        config = mock_client_instance.models.generate_content.call_args.kwargs["config"]
         assert config.thinking_config is not None
         assert "MINIMAL" in str(config.thinking_config.thinking_level).upper()
 
@@ -3229,9 +3232,7 @@ class TestThinkingLevelMinimalAndInvalid:
 
         out = capsys.readouterr().out
         assert "invalid thinking level" in out.lower()
-        config = mock_client_instance.models.generate_content.call_args.kwargs[
-            "config"
-        ]
+        config = mock_client_instance.models.generate_content.call_args.kwargs["config"]
         assert config.thinking_config is None
 
 
@@ -3293,9 +3294,7 @@ class TestFlash2ImageSize512:
         assert result is not None
         out = capsys.readouterr().out
         assert "not supported" not in out.lower()
-        config = mock_client_instance.models.generate_content.call_args.kwargs[
-            "config"
-        ]
+        config = mock_client_instance.models.generate_content.call_args.kwargs["config"]
         assert config.image_config is not None
         assert config.image_config.image_size == "512"
 

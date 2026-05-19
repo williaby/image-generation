@@ -30,3 +30,9 @@ Thank you for your interest in contributing to image-generation!
 
 Open a GitHub issue with a clear description and steps to reproduce. For
 security vulnerabilities see [SECURITY.md](SECURITY.md).
+
+## Code of Conduct
+
+This project follows the contributor expectations described in
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). All participants are expected to
+uphold those standards in every project space.

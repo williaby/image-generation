@@ -84,16 +84,28 @@ class TestTopazEnhanceSizeLimit:
         from scripts import generate_image as mod
 
         monkeypatch.setenv("TOPAZ_API_KEY", "fake-key")
+        # Disable .env discovery so pydantic-settings does not stat the project
+        # root .env file during Settings construction (the global Path.stat
+        # patch below would otherwise mis-fire there).
+        monkeypatch.setattr(mod, "_ENV_FILE", tmp_path / ".no-env")
 
         target = tmp_path / "broken.png"
         target.write_bytes(b"\x89PNG")
 
         # stat() raises a non-FileNotFound OSError (e.g., EACCES on the parent
         # mount): the new OSError handler should catch it and return None.
-        def raise_perm(self: Path) -> None:
-            raise PermissionError("simulated EACCES")
+        # Scope the patch to the target path's resolved location so unrelated
+        # stat calls (pydantic-settings .env discovery, output dirs) continue
+        # to work.
+        target_resolved = target.resolve()
+        real_stat = Path.stat
 
-        with patch.object(Path, "stat", raise_perm):
+        def selective_stat(self: Path, *args: object, **kwargs: object) -> object:
+            if self == target_resolved:
+                raise PermissionError("simulated EACCES")
+            return real_stat(self, *args, **kwargs)  # type: ignore[misc]
+
+        with patch.object(Path, "stat", selective_stat):
             result = mod.topaz_enhance_image(input_path=target, model="standard")
 
         assert result is None

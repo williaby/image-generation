@@ -37,7 +37,7 @@ permissions:
 jobs:
   compatibility:
     name: Python Compatibility Matrix
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-compatibility.yml@799ebd63e16aba0236ceded915f5c1cac20823b3  # main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-compatibility.yml@8fbdb549a33a93520e7b431d8d9b8d5e9478674a  # main
     with:
       # Matrix kept in lockstep with pyproject.toml `requires-python = ">=3.12"`.
       # 3.10/3.11 were removed because pip refuses installs on those versions
