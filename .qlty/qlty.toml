@@ -65,3 +65,15 @@ name = "ruff"
 
 [[plugin]]
 name = "bandit"
+# Restrict bandit to production code. Tests legitimately use `assert` (B101)
+# and other patterns that bandit flags as risky outside test contexts. The
+# pyproject.toml [tool.bandit] block has exclude_dirs/skips, but qlty invokes
+# bandit through its own plugin shim which does not read pyproject.toml, so
+# scoping happens here.
+prefix = "scripts/"
+
+# basedpyright is intentionally not enabled here: qlty's plugin registry does
+# not define a basedpyright plugin (qlty plugins list returns 68 plugins as of
+# qlty 0.625.0; only `mypy` is available for Python type-checking). Type
+# checking runs via `basedpyright` in pre-commit and the `python-quality` CI
+# job, so qlty does not need to replicate it.

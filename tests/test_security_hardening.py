@@ -53,71 +53,81 @@ class TestLoadImageAsBase64SizeLimit:
 
 
 class TestTopazEnhanceSizeLimit:
-    """topaz_enhance_image must return None (not raise) on oversize inputs."""
+    """topaz_enhance_image raises FileIOError (typed) on oversize / unreadable input."""
 
-    def test_oversize_input_returns_none_with_stderr(
+    def test_oversize_input_raises_file_io_error(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
     ) -> None:
         from scripts import generate_image as mod
+        from scripts.generate_image import FileIOError
 
         monkeypatch.setenv("TOPAZ_API_KEY", "fake-key")
         monkeypatch.setattr(mod, "MAX_INPUT_IMAGE_BYTES", 16)
         large = tmp_path / "huge.png"
         large.write_bytes(b"x" * 32)
 
-        result = mod.topaz_enhance_image(input_path=large, model="standard")
+        with pytest.raises(FileIOError) as excinfo:
+            mod.topaz_enhance_image(input_path=large, model="Standard V2")
 
-        assert result is None
-        err = capsys.readouterr().err
-        assert "exceeds limit" in err
-        assert str(large) in err
+        assert "exceeds limit" in str(excinfo.value)
+        assert str(large) in str(excinfo.value)
 
-    def test_stat_oserror_returns_none_with_stderr(
+    def test_stat_oserror_raises_file_io_error(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
     ) -> None:
         from scripts import generate_image as mod
+        from scripts.generate_image import FileIOError
 
         monkeypatch.setenv("TOPAZ_API_KEY", "fake-key")
+        # Disable .env discovery so pydantic-settings does not stat the project
+        # root .env file during Settings construction (the global Path.stat
+        # patch below would otherwise mis-fire there).
+        monkeypatch.setattr(mod, "_ENV_FILE", tmp_path / ".no-env")
 
         target = tmp_path / "broken.png"
         target.write_bytes(b"\x89PNG")
 
         # stat() raises a non-FileNotFound OSError (e.g., EACCES on the parent
-        # mount): the new OSError handler should catch it and return None.
-        def raise_perm(self: Path) -> None:
-            raise PermissionError("simulated EACCES")
+        # mount): the OSError handler now wraps it as FileIOError. Scope the
+        # patch to the target path's resolved location so unrelated stat calls
+        # (pydantic-settings .env discovery, output dirs) continue to work.
+        target_resolved = target.resolve()
+        real_stat = Path.stat
 
-        with patch.object(Path, "stat", raise_perm):
-            result = mod.topaz_enhance_image(input_path=target, model="standard")
+        def selective_stat(self: Path, *args: object, **kwargs: object) -> object:
+            if self == target_resolved:
+                raise PermissionError("simulated EACCES")
+            return real_stat(self, *args, **kwargs)  # type: ignore[misc]
 
-        assert result is None
-        err = capsys.readouterr().err
-        assert "Cannot stat" in err
+        with (
+            patch.object(Path, "stat", selective_stat),
+            pytest.raises(FileIOError) as excinfo,
+        ):
+            mod.topaz_enhance_image(input_path=target, model="Standard V2")
 
-    def test_missing_input_returns_none_with_clear_message(
+        assert "Cannot stat" in str(excinfo.value)
+
+    def test_missing_input_raises_file_io_error(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
     ) -> None:
         # The FileNotFoundError branch is now the canonical "missing file"
-        # path, replacing the old redundant exists() check.
+        # path; the contract is now a typed FileIOError, not a None return.
         from scripts import generate_image as mod
+        from scripts.generate_image import FileIOError
 
         monkeypatch.setenv("TOPAZ_API_KEY", "fake-key")
         missing = tmp_path / "does-not-exist.png"
 
-        result = mod.topaz_enhance_image(input_path=missing, model="standard")
+        with pytest.raises(FileIOError) as excinfo:
+            mod.topaz_enhance_image(input_path=missing, model="Standard V2")
 
-        assert result is None
-        err = capsys.readouterr().err
-        assert "not found" in err.lower()
+        assert "not found" in str(excinfo.value).lower()
 
 
 # ---------------------------------------------------------------------------

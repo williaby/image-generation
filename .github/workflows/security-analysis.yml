@@ -22,10 +22,14 @@ jobs:
       security-events: write
       pull-requests: write
       actions: read
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-security-analysis.yml@799ebd63e16aba0236ceded915f5c1cac20823b3 # main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-security-analysis.yml@8fbdb549a33a93520e7b431d8d9b8d5e9478674a # main
     with:
       python-version: "3.12"
-      run-safety: false
+      # `run-safety` was removed from the org reusable workflow when the
+      # CI-005-A SHA bump (799ebd63... -> 8fbdb549...) landed; safety-cli was
+      # superseded upstream. Passing it as an input causes a workflow-level
+      # `startup_failure` because GitHub strict-validates reusable inputs,
+      # which leaves `Security Gate Validation` permanently unreported.
       run-codeql: false
       run-dependency-review: true
       run-osv: false

@@ -5,4 +5,12 @@
 google-genai>=2.3.0,<2.4.0
 
 # HTTP client for Topaz Labs API (post-processing enhancement)
-requests>=2.32.0,<3.0.0
+httpx>=0.27.0,<1.0.0
+
+# Settings management (BaseSettings reads GEMINI_API_KEY / TOPAZ_API_KEY)
+pydantic-settings>=2.0.0,<3.0.0
+
+# Structured logging for error / diagnostic paths.
+# Upper bound on next major: structlog processor APIs historically change at
+# majors, and silent log misconfiguration is the typical failure mode.
+structlog>=24.0.0,<26.0.0
