@@ -92,7 +92,10 @@ select = [
 ]
 ignore = [
     "E501",                    # line-length (handled by ruff format)
-    "ANN101", "ANN102",        # legacy self/cls annotations (removed rules; kept for clarity)
+    # ANN101 / ANN102 (missing-type-self / missing-type-cls) were removed
+    # from ruff (>=0.4) because annotations on `self` and `cls` are inferred.
+    # Listing them in `ignore` previously triggered a "rules have been
+    # removed and ignoring them has no effect" warning on every ruff run.
     "TRY003",                  # long exception messages allowed
     "ISC001",                  # conflicts with ruff format (per ruff docs)
     "D203",                    # conflicts with D211 (no-blank-line-before-class); D211 preferred
