@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (PR follow-up, 2026-05-19)
+
+- **BREAKING:** `topaz_enhance_image` now raises typed `AppError` subclasses on
+  failure instead of returning `None`. Validation errors (unknown model, bad
+  output format, strength out of range, missing face-enhance flag, oversize
+  input, non-regular file) raise `ConfigError` or `FileIOError`; Topaz API and
+  SSRF errors raise `TopazAPIError`; disk-write errors raise `FileIOError`.
+  Callers that branched on `if result:` need to switch to typed exception
+  handling. `_run`'s `--enhance` and `--finalize --topaz` paths let typed
+  errors propagate to `main()`; the batch story-enhancement loop catches per
+  image so a single failure does not abort the whole batch. The class was
+  defined in PR #39 but never raised; this PR closes that gap.
+
 ### Added (compliance sweep 2026-05-18, PR #39)
 
 - `AppError` exception hierarchy in `scripts/generate_image.py`

@@ -21,6 +21,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from scripts.generate_image import ConfigError, FileIOError, TopazAPIError
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -94,7 +96,7 @@ def _happy_path_mocks(
 
 
 class TestRequestsUnavailable:
-    def test_returns_none_when_requests_not_available(
+    def test_raises_topaz_api_error_when_httpx_unavailable(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         inp = _make_input_png(tmp_path)
@@ -105,15 +107,14 @@ class TestRequestsUnavailable:
             mod.HTTPX_AVAILABLE = False
             from scripts.generate_image import topaz_enhance_image
 
-            result = topaz_enhance_image(inp)
+            with pytest.raises(TopazAPIError) as excinfo:
+                topaz_enhance_image(inp)
         finally:
             mod.HTTPX_AVAILABLE = original
 
-        assert result is None
         # The "httpx not available" message goes to stderr alongside the
         # size-limit error paths.
-        err = capsys.readouterr().err
-        assert "httpx" in err.lower()
+        assert "httpx" in str(excinfo.value).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +123,7 @@ class TestRequestsUnavailable:
 
 
 class TestNoApiKey:
-    def test_returns_none_when_api_key_missing(
+    def test_raises_config_error_when_api_key_missing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         inp = _make_input_png(tmp_path)
@@ -133,9 +134,10 @@ class TestNoApiKey:
         with patch("scripts.generate_image.Path.exists", return_value=False):
             from scripts.generate_image import topaz_enhance_image
 
-            result = topaz_enhance_image(inp)
+            with pytest.raises(ConfigError) as excinfo:
+                topaz_enhance_image(inp)
 
-        assert result is None
+        assert "TOPAZ_API_KEY" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +146,7 @@ class TestNoApiKey:
 
 
 class TestInputPathMissing:
-    def test_returns_none_for_nonexistent_input(
+    def test_raises_file_io_error_for_nonexistent_input(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -155,13 +157,14 @@ class TestInputPathMissing:
 
         from scripts.generate_image import topaz_enhance_image
 
-        result = topaz_enhance_image(missing)
-
-        assert result is None
+        with pytest.raises(FileIOError) as excinfo:
+            topaz_enhance_image(missing)
         # Missing-input message now goes via the FileNotFoundError branch
         # in stat(), which prints to stderr alongside the size-limit error.
-        err = capsys.readouterr().err
-        assert "not found" in err.lower() or "error" in err.lower()
+        assert (
+            "not found" in str(excinfo.value).lower()
+            or "error" in str(excinfo.value).lower()
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +173,7 @@ class TestInputPathMissing:
 
 
 class TestUnknownModel:
-    def test_returns_none_for_unknown_model(
+    def test_raises_config_error_for_unknown_model(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -181,11 +184,12 @@ class TestUnknownModel:
 
         from scripts.generate_image import topaz_enhance_image
 
-        result = topaz_enhance_image(inp, model="NonExistentModel9999")
-
-        assert result is None
-        err = capsys.readouterr().err
-        assert "unknown" in err.lower() or "nonexistentmodel" in err.lower()
+        with pytest.raises(ConfigError) as excinfo:
+            topaz_enhance_image(inp, model="NonExistentModel9999")
+        assert (
+            "unknown" in str(excinfo.value).lower()
+            or "nonexistentmodel" in str(excinfo.value).lower()
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +198,7 @@ class TestUnknownModel:
 
 
 class TestInvalidOutputFormat:
-    def test_returns_none_for_bmp_format(
+    def test_raises_config_error_for_bmp_format(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -205,11 +209,12 @@ class TestInvalidOutputFormat:
 
         from scripts.generate_image import topaz_enhance_image
 
-        result = topaz_enhance_image(inp, output_format="bmp")
-
-        assert result is None
-        err = capsys.readouterr().err
-        assert "output_format" in err.lower() or "bmp" in err.lower()
+        with pytest.raises(ConfigError) as excinfo:
+            topaz_enhance_image(inp, output_format="bmp")
+        assert (
+            "output_format" in str(excinfo.value).lower()
+            or "bmp" in str(excinfo.value).lower()
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +223,7 @@ class TestInvalidOutputFormat:
 
 
 class TestFaceStrengthWithoutFaceEnhance:
-    def test_returns_none_when_strength_set_without_flag(
+    def test_raises_config_error_when_strength_set_without_flag(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -229,15 +234,13 @@ class TestFaceStrengthWithoutFaceEnhance:
 
         from scripts.generate_image import topaz_enhance_image
 
-        result = topaz_enhance_image(
-            inp,
-            face_enhancement=False,
-            face_enhancement_strength=0.5,
-        )
-
-        assert result is None
-        err = capsys.readouterr().err
-        assert "face" in err.lower()
+        with pytest.raises(ConfigError) as excinfo:
+            topaz_enhance_image(
+                inp,
+                face_enhancement=False,
+                face_enhancement_strength=0.5,
+            )
+        assert "face" in str(excinfo.value).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +260,7 @@ class TestStrengthOutOfRange:
             {"face_enhancement": True, "face_enhancement_strength": 2.0},
         ],
     )
-    def test_returns_none_for_out_of_range(
+    def test_raises_config_error_for_out_of_range(
         self,
         kwargs: dict,
         tmp_path: Path,
@@ -269,11 +272,13 @@ class TestStrengthOutOfRange:
 
         from scripts.generate_image import topaz_enhance_image
 
-        result = topaz_enhance_image(inp, **kwargs)
-
-        assert result is None
-        err = capsys.readouterr().err
-        assert "0.0" in err or "1.0" in err or "between" in err.lower()
+        with pytest.raises(ConfigError) as excinfo:
+            topaz_enhance_image(inp, **kwargs)
+        assert (
+            "0.0" in str(excinfo.value)
+            or "1.0" in str(excinfo.value)
+            or "between" in str(excinfo.value).lower()
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +395,7 @@ class TestPoll429Retry:
 
 class TestPollingTimeout:
     @patch("scripts.generate_image.time.sleep")
-    def test_timeout_returns_none_with_message(
+    def test_timeout_raises_topaz_api_error(
         self,
         mock_sleep: MagicMock,
         tmp_path: Path,
@@ -413,11 +418,10 @@ class TestPollingTimeout:
         ):
             from scripts.generate_image import topaz_enhance_image
 
-            result = topaz_enhance_image(inp)
+            with pytest.raises(TopazAPIError) as excinfo:
+                topaz_enhance_image(inp)
 
-        assert result is None
-        err = capsys.readouterr().err
-        assert "did not complete within the polling limit" in err
+        assert "did not complete within the polling limit" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +431,7 @@ class TestPollingTimeout:
 
 class TestFailedStatus:
     @patch("scripts.generate_image.time.sleep")
-    def test_failed_status_returns_none(
+    def test_failed_status_raises_topaz_api_error(
         self,
         mock_sleep: MagicMock,
         tmp_path: Path,
@@ -449,11 +453,10 @@ class TestFailedStatus:
         ):
             from scripts.generate_image import topaz_enhance_image
 
-            result = topaz_enhance_image(inp)
+            with pytest.raises(TopazAPIError) as excinfo:
+                topaz_enhance_image(inp)
 
-        assert result is None
-        err = capsys.readouterr().err
-        assert "failed" in err.lower()
+        assert "failed" in str(excinfo.value).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +466,7 @@ class TestFailedStatus:
 
 class TestMissingProcessId:
     @patch("scripts.generate_image.time.sleep")
-    def test_missing_process_id_returns_none(
+    def test_missing_process_id_raises_topaz_api_error(
         self,
         mock_sleep: MagicMock,
         tmp_path: Path,
@@ -480,11 +483,10 @@ class TestMissingProcessId:
         with patch("scripts.generate_image.httpx.post", post_mock):
             from scripts.generate_image import topaz_enhance_image
 
-            result = topaz_enhance_image(inp)
+            with pytest.raises(TopazAPIError) as excinfo:
+                topaz_enhance_image(inp)
 
-        assert result is None
-        err = capsys.readouterr().err
-        assert "process_id" in err.lower()
+        assert "process_id" in str(excinfo.value).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +497,7 @@ class TestMissingProcessId:
 class TestMalformedSubmitJson:
     """A 200 response whose body is not valid JSON must be caught, not raised."""
 
-    def test_malformed_submit_json_returns_none(
+    def test_malformed_submit_json_raises_topaz_api_error(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -517,18 +519,17 @@ class TestMalformedSubmitJson:
         with patch("scripts.generate_image.httpx.post", post_mock):
             from scripts.generate_image import topaz_enhance_image
 
-            result = topaz_enhance_image(inp)
+            with pytest.raises(TopazAPIError) as excinfo:
+                topaz_enhance_image(inp)
 
-        assert result is None
         # `time.sleep` is unreachable on submit failure (we return before
         # entering the polling loop), so no patch of `time.sleep` is needed.
-        err = capsys.readouterr().err
         # Lock to the specific error path: the submit branch's enriched
         # diagnostic. A vague "topaz" substring also appears in the
         # polling-timeout message; tighter check prevents wrong-path passes.
-        assert "Topaz submit" in err
-        assert "non-JSON" in err
-        assert "status=200" in err
+        assert "Topaz submit" in str(excinfo.value)
+        assert "non-JSON" in str(excinfo.value)
+        assert "status=200" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +541,7 @@ class TestMalformedStatusJson:
     """A 200 status-poll response whose body is not valid JSON must be caught."""
 
     @patch("scripts.generate_image.time.sleep")
-    def test_malformed_status_json_returns_none(
+    def test_malformed_status_json_raises_topaz_api_error(
         self,
         mock_sleep: MagicMock,
         tmp_path: Path,
@@ -566,12 +567,11 @@ class TestMalformedStatusJson:
         ):
             from scripts.generate_image import topaz_enhance_image
 
-            result = topaz_enhance_image(inp, output_path=out_path)
+            with pytest.raises(TopazAPIError) as excinfo:
+                topaz_enhance_image(inp, output_path=out_path)
 
-        assert result is None
-        err = capsys.readouterr().err
-        assert "polling Topaz status" in err
-        assert "job-bad-status" in err
+        assert "polling Topaz status" in str(excinfo.value)
+        assert "job-bad-status" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -583,7 +583,7 @@ class TestMalformedDownloadJson:
     """A 200 download-URL response whose body is not valid JSON must be caught."""
 
     @patch("scripts.generate_image.time.sleep")
-    def test_malformed_download_url_json_returns_none(
+    def test_malformed_download_url_json_raises_topaz_api_error(
         self,
         mock_sleep: MagicMock,
         tmp_path: Path,
@@ -614,14 +614,13 @@ class TestMalformedDownloadJson:
         ):
             from scripts.generate_image import topaz_enhance_image
 
-            result = topaz_enhance_image(inp, output_path=out_path)
+            with pytest.raises(TopazAPIError) as excinfo:
+                topaz_enhance_image(inp, output_path=out_path)
 
-        assert result is None
         assert get_mock.call_count == 2
-        err = capsys.readouterr().err
-        assert "Topaz download URL" in err
-        assert "job-bad-dl" in err
-        assert "non-JSON" in err
+        assert "Topaz download URL" in str(excinfo.value)
+        assert "job-bad-dl" in str(excinfo.value)
+        assert "non-JSON" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +630,7 @@ class TestMalformedDownloadJson:
 
 class TestMissingDownloadUrl:
     @patch("scripts.generate_image.time.sleep")
-    def test_missing_download_url_returns_none(
+    def test_missing_download_url_raises_topaz_api_error(
         self,
         mock_sleep: MagicMock,
         tmp_path: Path,
@@ -656,11 +655,13 @@ class TestMissingDownloadUrl:
         ):
             from scripts.generate_image import topaz_enhance_image
 
-            result = topaz_enhance_image(inp, output_path=out_path)
+            with pytest.raises(TopazAPIError) as excinfo:
+                topaz_enhance_image(inp, output_path=out_path)
 
-        assert result is None
-        err = capsys.readouterr().err
-        assert "url" in err.lower() or "download" in err.lower()
+        assert (
+            "url" in str(excinfo.value).lower()
+            or "download" in str(excinfo.value).lower()
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +671,7 @@ class TestMissingDownloadUrl:
 
 class TestSsrfDisallowedHostname:
     @patch("scripts.generate_image.time.sleep")
-    def test_bad_hostname_returns_none(
+    def test_bad_hostname_raises_topaz_api_error(
         self,
         mock_sleep: MagicMock,
         tmp_path: Path,
@@ -694,14 +695,13 @@ class TestSsrfDisallowedHostname:
         ):
             from scripts.generate_image import topaz_enhance_image
 
-            result = topaz_enhance_image(inp)
+            with pytest.raises(TopazAPIError) as excinfo:
+                topaz_enhance_image(inp)
 
-        assert result is None
-        err = capsys.readouterr().err
         assert (
-            "unexpected" in err.lower()
-            or "ssrf" in err.lower()
-            or "evil" in err.lower()
+            "unexpected" in str(excinfo.value).lower()
+            or "ssrf" in str(excinfo.value).lower()
+            or "evil" in str(excinfo.value).lower()
         )
 
 
@@ -712,7 +712,7 @@ class TestSsrfDisallowedHostname:
 
 class TestSsrfHttpScheme:
     @patch("scripts.generate_image.time.sleep")
-    def test_http_scheme_returns_none(
+    def test_http_scheme_raises_topaz_api_error(
         self,
         mock_sleep: MagicMock,
         tmp_path: Path,
@@ -736,11 +736,13 @@ class TestSsrfHttpScheme:
         ):
             from scripts.generate_image import topaz_enhance_image
 
-            result = topaz_enhance_image(inp)
+            with pytest.raises(TopazAPIError) as excinfo:
+                topaz_enhance_image(inp)
 
-        assert result is None
-        err = capsys.readouterr().err
-        assert "http" in err.lower() or "unexpected" in err.lower()
+        assert (
+            "http" in str(excinfo.value).lower()
+            or "unexpected" in str(excinfo.value).lower()
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +785,7 @@ class TestAllowRedirectsFalse:
 
 class TestEmptyImageBytes:
     @patch("scripts.generate_image.time.sleep")
-    def test_empty_bytes_returns_none(
+    def test_empty_bytes_raises_topaz_api_error(
         self,
         mock_sleep: MagicMock,
         tmp_path: Path,
@@ -801,11 +803,10 @@ class TestEmptyImageBytes:
         ):
             from scripts.generate_image import topaz_enhance_image
 
-            result = topaz_enhance_image(inp)
+            with pytest.raises(TopazAPIError) as excinfo:
+                topaz_enhance_image(inp)
 
-        assert result is None
-        err = capsys.readouterr().err
-        assert "empty" in err.lower()
+        assert "empty" in str(excinfo.value).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -815,7 +816,7 @@ class TestEmptyImageBytes:
 
 class TestDiskWriteFailure:
     @patch("scripts.generate_image.time.sleep")
-    def test_oserror_on_write_returns_none(
+    def test_oserror_on_write_raises_file_io_error(
         self,
         mock_sleep: MagicMock,
         tmp_path: Path,
@@ -843,11 +844,10 @@ class TestDiskWriteFailure:
         ):
             from scripts.generate_image import topaz_enhance_image
 
-            result = topaz_enhance_image(inp, output_path=out_path)
+            with pytest.raises(FileIOError) as excinfo:
+                topaz_enhance_image(inp, output_path=out_path)
 
-        assert result is None
-        err = capsys.readouterr().err
-        assert "error" in err.lower()
+        assert "error" in str(excinfo.value).lower()
 
 
 # ---------------------------------------------------------------------------
