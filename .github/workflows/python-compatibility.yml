@@ -39,10 +39,12 @@ jobs:
     name: Python Compatibility Matrix
     uses: ByronWilliamsCPA/.github/.github/workflows/python-compatibility.yml@8fbdb549a33a93520e7b431d8d9b8d5e9478674a  # main
     with:
-      # Matrix kept in lockstep with pyproject.toml `requires-python = ">=3.12"`.
-      # 3.10/3.11 were removed because pip refuses installs on those versions
-      # under the current requires-python, making those cells either red or
-      # silently mis-resolved to a newer interpreter.
+      # Matrix kept in lockstep with pyproject.toml
+      # `requires-python = ">=3.10,<3.15"` (widened from `>=3.12` in the
+      # 2026-05 compliance sweep, GCA-006). 3.12 and 3.13 are the in-CI cells
+      # because both have stable wheels for google-genai, httpx, and pydantic-
+      # settings; 3.10/3.11 are supported but only smoke-tested via uv resolves
+      # locally to keep the cross-OS matrix tractable.
       python-versions: '["3.12", "3.13"]'
       operating-systems: '["ubuntu-latest"]'
       include-macos: true

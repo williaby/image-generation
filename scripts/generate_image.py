@@ -540,16 +540,17 @@ def topaz_enhance_image(
         if face_enhancement_strength is not None:
             data["face_enhancement_strength"] = face_enhancement_strength
 
-    # Submit async job. Narrowing: catch network errors (httpx.HTTPError
-    # covers timeouts, HTTP status errors, transport failures) and the parsing-
-    # adjacent ValueError / KeyError that arises from a malformed response
-    # body. Other exceptions (KeyboardInterrupt, MemoryError, programmer
-    # bugs) should propagate.
-    #
-    # ``resp`` is declared above the try/except so the static checker sees it
-    # as bound in the ValueError handler even if ``httpx.post`` is the call
-    # that raised.
-    resp: httpx.Response | None = None
+    # Submit async job. Split into two try blocks:
+    #   1. Network + file-read errors (httpx.HTTPError covers timeouts, HTTP
+    #      status errors, transport failures; OSError covers input file read
+    #      issues).
+    #   2. JSON parse errors (ValueError from `resp.json()` on a 200 response
+    #      with a non-JSON body, the c780c57 fix surface).
+    # Splitting means `resp` is provably bound at the JSON-parse site (no
+    # exception escaped the first block), removing the need for `assert resp
+    # is not None` narrowing -- which bandit flags as B101 in production code.
+    # Other exceptions (KeyboardInterrupt, MemoryError, programmer bugs)
+    # propagate to main()'s outer handler.
     try:
         with open(input_path, "rb") as f:
             resp = httpx.post(
@@ -560,25 +561,22 @@ def topaz_enhance_image(
                 timeout=30,
             )
         resp.raise_for_status()
-        submit_payload = resp.json()
     except httpx.HTTPError as e:
         log.error(f"Error submitting Topaz job (transport): {e}")
         return None
+    except OSError as e:
+        log.error(f"Error reading Topaz input file: {e}")
+        return None
+
+    try:
+        submit_payload = resp.json()
     except ValueError as e:
-        # `resp.json()` raised on a 200-or-redirected response whose body is
-        # not valid JSON. ``raise_for_status`` ran first, so ``resp`` is
-        # guaranteed bound to a non-None value here.
-        assert resp is not None  # noqa: S101 - control-flow narrowing for type checker
         log.error(
             f"Error: Topaz submit returned non-JSON body "
             f"(status={resp.status_code}): {e}; "
             f"body[:200]={resp.text[:200]!r}"
         )
         return None
-    except OSError as e:
-        log.error(f"Error reading Topaz input file: {e}")
-        return None
-    assert resp is not None  # noqa: S101 - narrowing after successful POST
 
     if not isinstance(submit_payload, dict):
         # Defend against a top-level JSON value that is not a JSON object
@@ -644,8 +642,8 @@ def topaz_enhance_image(
         )
         return None
 
-    # Get download URL
-    dl_resp: httpx.Response | None = None
+    # Get download URL -- same split-try pattern as the submit block above:
+    # network errors first, then JSON parse errors with dl_resp provably bound.
     try:
         dl_resp = httpx.get(
             f"{TOPAZ_BASE_URL}/download/{process_id}",
@@ -653,21 +651,21 @@ def topaz_enhance_image(
             timeout=15,
         )
         dl_resp.raise_for_status()
-        dl_payload = dl_resp.json()
     except httpx.HTTPError as e:
         log.error(
             f"Error getting Topaz download URL for job {process_id} (transport): {e}"
         )
         return None
+
+    try:
+        dl_payload = dl_resp.json()
     except ValueError as e:
-        assert dl_resp is not None  # noqa: S101 - narrowing for type checker
         log.error(
             f"Error: Topaz download URL response was non-JSON for job "
             f"{process_id} (status={dl_resp.status_code}): {e}; "
             f"body[:200]={dl_resp.text[:200]!r}"
         )
         return None
-    assert dl_resp is not None  # noqa: S101 - narrowing after successful GET
 
     if not isinstance(dl_payload, dict):
         log.error(

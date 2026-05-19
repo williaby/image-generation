@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (compliance sweep 2026-05-18, PR #39)
+
+- `AppError` exception hierarchy in `scripts/generate_image.py`
+  (`ConfigError`, `GeminiAPIError`, `TopazAPIError`, `FileIOError`); see
+  `scripts/CLAUDE.md` for the contract. `main()` catches `AppError` for a
+  clean stderr message and exit code 1; the outer `except Exception` is the
+  safety net for programmer bugs only.
+- `Settings(BaseSettings)` model reading `GEMINI_API_KEY` / `TOPAZ_API_KEY`
+  via `pydantic-settings`, replacing the prior manual `.env` parser.
+- `structlog`-backed `_StderrLogger` for error and warning paths; user-facing
+  success output continues to use stdout `print()`.
+- Property-based fuzz tests in `tests/test_fuzz.py` covering
+  `detect_image_format`, `get_extension_for_mime`, and the CLI argument
+  parser (Hypothesis).
+- `.github/workflows/release.yml` for auto-generated GitHub Releases on
+  semver tag push.
+- `.github/workflows/dependency-review.yml` for per-PR dependency
+  vulnerability scanning.
+- Pre-commit hooks: `detect-secrets`, `interrogate`, `darglint`,
+  `commitizen`, `yamllint`, `markdownlint`. TruffleHog hook is now
+  fail-closed when the binary is missing.
+- `.markdownlint.yaml` baseline config and `.secrets.baseline` registry.
+- Folder-scoped conventions: `scripts/CLAUDE.md` and `tests/CLAUDE.md`.
+
+### Changed (compliance sweep 2026-05-18, PR #39)
+
+- **BREAKING:** Several failure paths in `generate_image()` now raise
+  `AppError` subclasses instead of returning `None`. Callers that branch on
+  `result is None` for typed failures (`GeminiAPIError`, `FileIOError`,
+  `ConfigError`) need to migrate to typed exception handling. `None` is
+  still used for non-error empty-response paths.
+- `requests` HTTP client replaced with `httpx` throughout the Topaz
+  integration. The `REQUESTS_AVAILABLE = HTTPX_AVAILABLE` alias is retained
+  for backward-compatible test fixtures.
+- Python support widened from `>=3.12` to `>=3.10,<3.15`; `ruff
+  target-version` lowered to `py310`.
+- `basedpyright` `pythonPlatform` widened from `Linux` to `All`, so
+  per-OS path checks fire.
+- `basedpyright` scope expanded to `scripts/` and `tests/`;
+  `scripts/generate_image.py` previously excluded.
+- CI `ci.yml` `python-quality` job runs `ruff format --check`, `ruff
+  check`, `basedpyright`, `pytest --cov`, and `pip-audit` on every push and
+  PR to main, with coverage uploaded as the `coverage-reports` artifact.
+- `qlty` configuration restricts the `bandit` plugin to `scripts/`;
+  `basedpyright` is intentionally omitted from `.qlty/qlty.toml` because
+  qlty's plugin registry has no `basedpyright` plugin (verified against
+  `qlty 0.625.0 plugins list`). Type-checking continues to run via
+  pre-commit and the `python-quality` CI job.
+- Release workflow `permissions` scoped per-job (`contents: write` only on
+  the release job) rather than at workflow scope, satisfying
+  least-privilege.
+- `structlog` upper-bounded at `<26.0.0` in both `pyproject.toml` and
+  `requirements.txt` to guard against silent processor-API breaks at the
+  next major.
+
+### Fixed (compliance sweep 2026-05-18, PR #39)
+
+- `qlty check` CI gate: `.qlty/qlty.toml` previously declared
+  `[[plugin]] name = "basedpyright"`, which is not in qlty's plugin registry
+  (only `mypy` is available for Python type-checking). Removed; basedpyright
+  continues to run via pre-commit and CI's `python-quality` job.
+- Removed four `assert resp is not None  # noqa: S101` statements and their
+  suppressions in `topaz_enhance_image` by splitting the Topaz submit and
+  download-URL try/except blocks into separate network-error and
+  JSON-parse-error blocks. The split makes the response variables provably
+  bound at the parse site, eliminating the need for narrowing asserts that
+  bandit flags as B101 in production code.
+
 ### Added
 
 - Nano Banana 2 (`gemini-3.1-flash-image-preview`) as the new `flash-2` model
