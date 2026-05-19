@@ -131,7 +131,7 @@ python scripts/generate_image.py --help
 
 ## Project Structure
 
-```
+```text
 image-generation/
 ├── README.md                           # This file
 ├── scripts/
@@ -217,6 +217,7 @@ The `agents/diagram-specialist.md` can be used with Claude Code for:
 **Solution**: The script automatically detects actual format from magic bytes and corrects extensions.
 
 **Manual Check**:
+
 ```bash
 file output/*.png  # Verify format matches extension
 ```
@@ -232,6 +233,10 @@ file output/*.png  # Verify format matches extension
 - Generate first image with detailed style specs
 - Use that image as reference for subsequent images
 - Maintain consistent aspect ratio and resolution
+
+## API Reference
+
+**API reference**: This project is a command-line tool; it exposes no programmatic API. The CLI flags are documented in the `--help` output and in [docs/IMAGE_GENERATION_GUIDE.md](docs/IMAGE_GENERATION_GUIDE.md). (N/A for OpenSSF Best Practices Badge criterion `basics_documentation_interface`.)
 
 ## License
 

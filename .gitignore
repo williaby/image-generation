@@ -75,6 +75,9 @@ Thumbs.db
 *.tmp
 *.temp
 
+# Session handoff documents (per .claude/skills/handoff)
+tmp_cleanup/
+
 # Qlty code quality tool (track config only)
 .qlty/*
 !.qlty/qlty.toml

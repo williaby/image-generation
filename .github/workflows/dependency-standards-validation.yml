@@ -1,10 +1,12 @@
-# Stub for the "Dependency & Standards Validation" required status context.
-# Emits the check name so the williaby-default-branch-baseline ruleset (ID
-# 16201085) does not block all PRs. Real validation (pip-audit, interrogate,
-# darglint, license header check) is deferred to a follow-up issue.
+# Dependency and Standards Validation
 #
-# See: docs/superpowers/plans/2026-05-16-reusable-ci-workflow-audit.md
-# (handoff doc lists this as a known stub to replace org-wide).
+# Satisfies the "Dependency & Standards Validation" required status check in
+# the williaby-default-branch-baseline ruleset (ID 16201085).
+#
+# Checks performed:
+#   - pip-audit: dependency vulnerability scan (confirmed CVEs fail the build)
+#   - REUSE compliance: license header validation via fsfe/reuse-action
+#   - License file presence: verifies LICENSES/ directory is populated
 name: Dependency and Standards Validation
 
 on:
@@ -19,6 +21,35 @@ jobs:
   dep-standards:
     name: Dependency & Standards Validation
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - name: Placeholder
-        run: echo "stub"
+      - name: Harden runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5  # v2.19.3
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081  # v5
+        with:
+          enable-cache: true
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: Dependency vulnerability audit (pip-audit)
+        run: uv run pip-audit
+
+      - name: REUSE license compliance check
+        uses: fsfe/reuse-action@676e2d560c9a403aa252096d99fcab3e1132b0f5  # v6.0.0
+
+      - name: Verify license files present
+        run: |
+          if [ ! -d "LICENSES" ] || [ -z "$(ls -A LICENSES/)" ]; then
+            echo "::error::LICENSES/ directory is missing or empty."
+            exit 1
+          fi
+          echo "LICENSES/ directory is populated."
