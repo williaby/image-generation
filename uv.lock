@@ -679,7 +679,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
-    { name = "structlog", specifier = ">=24.0.0" },
+    { name = "structlog", specifier = ">=24.0.0,<26.0.0" },
     { name = "urllib3", specifier = ">=2.7.0,<3.0.0" },
 ]
 provides-extras = ["dev"]

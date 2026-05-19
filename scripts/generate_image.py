@@ -75,6 +75,7 @@ from urllib.parse import urlparse
 
 import httpx
 import structlog
+from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Compatibility shim for the ``datetime.UTC`` constant. Python 3.11 added
@@ -89,6 +90,14 @@ UTC = timezone.utc
 # size because both the raw bytes and the base64-encoded copy (~1.33x expansion)
 # are held simultaneously before the API call.
 MAX_INPUT_IMAGE_BYTES = 100 * 1024 * 1024
+
+# Topaz Labs download host allowlist. SSRF guard for the image fetch step in
+# topaz_enhance_image: Topaz returns a signed download URL; we restrict the
+# host to a known allowlist before issuing the GET. Kept at module scope so
+# the security boundary is visible at audit time, not buried mid-function.
+TOPAZ_DOWNLOAD_HOSTS: frozenset[str] = frozenset(
+    {"api.topazlabs.com", "cdn.topazlabs.com"}
+)
 
 # ``google-genai`` is a hard dependency declared in pyproject.toml, but tests
 # in CI environments sometimes install it lazily. The try/except preserves
@@ -178,7 +187,15 @@ def _configure_logging(verbose: bool = False) -> None:
     )
 
 
-# Configure once at import so module-level callers get a working logger;
+# #CRITICAL: Module-import side effect. ``structlog.configure(...)`` mutates
+# global processor state, so any test that imports this module observes the
+# configured pipeline regardless of fixture isolation. The deferred-import
+# pattern in tests/CLAUDE.md helps but does not eliminate this -- once a test
+# body imports ``scripts.generate_image``, all subsequent ``structlog.get_logger``
+# calls in the test process use this config.
+# #VERIFY: tests/test_generate_image.py exercises the _configure_logging path
+# at least once (currently via _StderrLogger capsys interaction); add a direct
+# assertion that re-calling _configure_logging is idempotent.
 # ``_run`` re-configures after parsing ``--verbose``.
 _configure_logging(verbose=False)
 log = structlog.get_logger(__name__)
@@ -356,8 +373,39 @@ def get_settings() -> Settings:
     A fresh instance is returned on every call so that tests that mutate the
     process environment with ``monkeypatch.setenv`` / ``monkeypatch.delenv``
     observe their changes without having to invalidate a cache.
+
+    A malformed or unreadable ``.env`` file raises ``ConfigError`` rather than
+    propagating raw ``pydantic.ValidationError`` / ``OSError``, so the user
+    sees a single typed error class instead of an "Unexpected error" blob.
+    The legacy behavior (silently fall back to environment variables when the
+    ``.env`` file is unreadable) is preserved for ``OSError`` to avoid breaking
+    users who set keys via the process environment but happen to have an
+    unreadable stub file.
     """
-    return Settings()
+    try:
+        return Settings()
+    except OSError as exc:
+        log.warning(
+            f"Could not read .env file at {_ENV_FILE}: {exc}; "
+            "falling back to process environment variables only."
+        )
+        return Settings(_env_file=None)  # type: ignore[call-arg]
+    except UnicodeDecodeError as exc:
+        # python-dotenv reads the .env stream as UTF-8 before pydantic ever
+        # sees it; non-UTF-8 bytes raise here, outside ValidationError. Map
+        # to ConfigError so the user sees a single typed error class.
+        raise ConfigError(
+            f"Cannot decode .env file at {_ENV_FILE} as UTF-8 "
+            f"(byte {exc.start}: {exc.reason}). "
+            "Re-save the file as UTF-8 or delete it to use process env "
+            "variables only."
+        ) from exc
+    except ValidationError as exc:
+        raise ConfigError(
+            f"Invalid configuration in {_ENV_FILE}: {exc}. "
+            "Check that the file is valid `KEY=value` lines and that values "
+            "match the expected types in the Settings model."
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +571,8 @@ def topaz_enhance_image(
     # #VERIFY   -- Audit log handler config before enabling debug logging.
     # #ASSUME: Topaz API at TOPAZ_BASE_URL accepts multipart/form-data for all model endpoints.
     # #VERIFY   -- Check developer.topazlabs.com changelog before upgrading httpx.
-    _TOPAZ_DOWNLOAD_HOSTS = frozenset({"api.topazlabs.com", "cdn.topazlabs.com"})
+    # SSRF guard for the download step uses the module-level
+    # `TOPAZ_DOWNLOAD_HOSTS` allowlist.
     headers = {"X-API-KEY": api_key}
     endpoint_url = f"{TOPAZ_BASE_URL}/{model_config['endpoint']}"
 
@@ -600,10 +649,17 @@ def topaz_enhance_image(
     if verbose:
         print(f"  Job submitted: {process_id}")
 
-    # #ASSUME: job completes within 25 poll iterations; max wall time ~5 minutes.
-    # #VERIFY   -- Confirm polling cap against Topaz SLA docs.
-    # #EDGE: sustained 429 responses exhaust iterations and are reported as "did not complete".
-    # #VERIFY   -- Test with mock that returns 429 indefinitely; confirm timeout message emitted.
+    # #ASSUME: job completes within 25 poll iterations. Happy-path wall time is
+    # ~5 minutes (1.5x backoff capped at 15 s per iteration). Under sustained
+    # HTTP 429 backoff the 2x backoff caps at 30 s per iteration, so the
+    # worst-case wall time is ~12 minutes before the loop falls through to
+    # the "did not complete" branch.
+    # #VERIFY -- Confirm polling cap and the 30 s/15 s caps against Topaz
+    # SLA docs before changing the iteration count or the backoff factors.
+    # #EDGE: sustained 429 responses exhaust iterations and are reported as
+    # "did not complete".
+    # #VERIFY -- Test with mock that returns 429 indefinitely; confirm
+    # timeout message emitted (no separate exception type today).
     wait = 2.0
     for _ in range(25):
         time.sleep(wait)
@@ -683,7 +739,7 @@ def topaz_enhance_image(
     # #ASSUME: download_url is a valid HTTPS URL served from api.topazlabs.com or its CDN.
     # #VERIFY   -- Check Topaz CDN policy if infrastructure change announced.
     _parsed = urlparse(download_url)
-    if _parsed.scheme != "https" or _parsed.hostname not in _TOPAZ_DOWNLOAD_HOSTS:
+    if _parsed.scheme != "https" or _parsed.hostname not in TOPAZ_DOWNLOAD_HOSTS:
         log.error(f"Error: Topaz returned unexpected download URL: {download_url!r}")
         return None
 
@@ -975,8 +1031,9 @@ def generate_image(
     api_key = get_api_key()
 
     if model_key not in MODELS:
-        print(f"Error: Unknown model '{model_key}'. Use --list-models to see options.")
-        return None
+        raise ConfigError(
+            f"Unknown model '{model_key}'. Use --list-models to see options."
+        )
 
     model_config = MODELS[model_key]
     model_id = model_config["id"]
@@ -1117,12 +1174,31 @@ def generate_image(
             config=generate_config,
         )
 
-        # Process response
+        # Process response. Two empty-output cases surface as
+        # ``GeminiAPIError`` so callers see a single, typed error rather than
+        # an opaque ``AttributeError`` from a ``None`` content body:
+        #   1. ``response.candidates`` is empty (rare; usually means safety
+        #      filter rejected the prompt before any candidate was scored).
+        #   2. ``candidates[0].content`` is ``None`` (model refused or
+        #      returned no parts; ``prompt_feedback`` typically carries the
+        #      reason).
+        # In both cases ``prompt_feedback`` is included in the exception
+        # message when present so the user can act on the refusal reason.
         if not response.candidates:
-            print("Error: No response candidates returned.")
-            if hasattr(response, "prompt_feedback"):
-                print(f"Feedback: {response.prompt_feedback}")
-            return None
+            feedback = getattr(response, "prompt_feedback", None)
+            raise GeminiAPIError(
+                "Gemini returned no response candidates "
+                f"(prompt_feedback={feedback!r})."
+            )
+
+        candidate_content = response.candidates[0].content
+        if candidate_content is None:
+            feedback = getattr(response, "prompt_feedback", None)
+            raise GeminiAPIError(
+                "Gemini returned a candidate with no content "
+                "(typically a safety-filter refusal); "
+                f"prompt_feedback={feedback!r}."
+            )
 
         # Track thoughts and final images
         thought_count = 0
@@ -1131,7 +1207,7 @@ def generate_image(
         final_signature = None
 
         # Process all parts in response
-        for part in response.candidates[0].content.parts:
+        for part in candidate_content.parts:
             # Check if this is a thought (intermediate reasoning step)
             is_thought = hasattr(part, "thought") and part.thought
 
@@ -1248,8 +1324,19 @@ def generate_image(
                     # No extension specified - add the detected one
                     output_path = output_path.with_suffix(detected_ext)
 
-                # If path doesn't start with output/, prepend it
-                if not str(output_path).startswith("output"):
+                # Re-anchor any path that does not already resolve to a
+                # subdirectory of the repo-root ``output/``. Resolving both
+                # sides avoids the prior ``str.startswith("output")`` check,
+                # which a path like ``output/../../../etc/cron.d/x`` would
+                # satisfy textually while resolving outside the tree.
+                allowed_root = (script_dir / "output").resolve()
+                try:
+                    resolved_out = output_path.resolve()
+                except OSError:
+                    resolved_out = None
+                if resolved_out is None or not resolved_out.is_relative_to(
+                    allowed_root
+                ):
                     if is_draft:
                         output_path = script_dir / "output/drafts" / output_path.name
                     # Check if this looks like a final (contains "final" in name)
@@ -1315,8 +1402,10 @@ def generate_image(
 
             return output_path
 
-        print("Error: No image data in response.")
-        return None
+        raise GeminiAPIError(
+            "Gemini response contained no inline image data; "
+            "the candidate yielded only thought / text parts."
+        )
 
     except AppError:
         # Already a typed application error; propagate so ``main()`` produces
@@ -1359,8 +1448,7 @@ def generate_story_sequence(
         List of paths to generated images
     """
     if num_parts < 1:
-        print("Error: Number of story parts must be at least 1")
-        return []
+        raise ConfigError("Number of story parts must be at least 1.")
 
     if output_prefix is None:
         timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
@@ -1369,8 +1457,9 @@ def generate_story_sequence(
 
     get_api_key()  # Validate API key exists
     if model_key not in MODELS:
-        print(f"Error: Unknown model '{model_key}'. Use --list-models to see options.")
-        return []
+        raise ConfigError(
+            f"Unknown model '{model_key}'. Use --list-models to see options."
+        )
 
     generated_images = []
     previous_image_path = None
@@ -1399,26 +1488,38 @@ def generate_story_sequence(
 
         print(f"Prompt: {prompt[:100]}...")
 
-        # Generate this part
-        result = generate_image(
-            prompt=prompt,
-            model_key=model_key,
-            reference_images=reference_images,
-            output_path=output_path,
-            aspect_ratio=aspect_ratio,
-            image_size=image_size,
-            use_search=False,
-            save_thoughts=False,
-            verbose=verbose,
-            thinking_level=thinking_level,
-        )
+        # Generate this part. ``generate_image`` now raises typed AppError
+        # subclasses (GeminiAPIError, FileIOError, ConfigError) on failure
+        # rather than returning None. Catch the API and file errors here so
+        # the story sequence can stop cleanly and still emit the partial
+        # completion summary below; let ConfigError propagate because a
+        # configuration failure is fatal for the whole sequence.
+        try:
+            result = generate_image(
+                prompt=prompt,
+                model_key=model_key,
+                reference_images=reference_images,
+                output_path=output_path,
+                aspect_ratio=aspect_ratio,
+                image_size=image_size,
+                use_search=False,
+                save_thoughts=False,
+                verbose=verbose,
+                thinking_level=thinking_level,
+            )
+        except (GeminiAPIError, FileIOError) as exc:
+            log.error(f"Failed to generate part {part_num}: {exc}")
+            break
 
         if result:
             generated_images.append(result)
             previous_image_path = result
-            print(f"✓ Part {part_num} complete: {result}")
+            print(f"Part {part_num} complete: {result}")
         else:
-            print(f"✗ Failed to generate part {part_num}")
+            # Defensive: generate_image() should now always raise on failure,
+            # but ``None`` could still appear from a non-error empty-response
+            # path. Stop the sequence rather than recurse on a missing image.
+            log.error(f"Part {part_num} produced no image; stopping sequence.")
             break
 
     print(f"\n{'=' * 60}")
@@ -1889,7 +1990,14 @@ def main() -> None:
         log.error("Interrupted.")
         sys.exit(130)
     except Exception as exc:
-        log.error(f"Unexpected error: {exc}")
+        # ``exc_info=exc`` preserves the traceback in the structlog event so
+        # users have a real bug report to attach. Without it the user only
+        # sees a one-line ``str(exc)`` with no file/line, which makes the
+        # "is this a bug, please report it" instruction unactionable.
+        log.error(
+            "Unexpected error (please report as a bug, include the traceback below)",
+            exc_info=exc,
+        )
         sys.exit(1)
 
 

@@ -7,6 +7,11 @@ Thank you for your interest in contributing to image-generation!
 1. Fork the repository and clone your fork.
 2. Install dependencies: `uv sync --all-extras`.
 3. Install pre-commit hooks: `pre-commit install`.
+4. Install required CLI tooling on your machine: `trufflehog`. The pre-commit
+   secret-scanning hook is fail-closed (it exits non-zero when the binary is
+   absent), so commits will fail locally until trufflehog is on `$PATH`.
+   Install via your package manager (e.g. `brew install trufflehog`), or
+   follow [trufflesecurity.com/trufflehog](https://trufflesecurity.com/trufflehog).
 
 ## Development Workflow
 

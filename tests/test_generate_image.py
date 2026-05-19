@@ -715,21 +715,25 @@ class TestGenerateImageSuccess:
 
 
 class TestGenerateImageEmptyCandidates:
-    """When the API returns no candidates, the function must not crash."""
+    """When the API returns no candidates, the function raises GeminiAPIError.
 
-    def test_empty_candidates_returns_none(
+    Previously this path printed an error and returned None. The typed-raise
+    contract (PR #39) makes the failure visible to ``main()`` as a typed
+    AppError so the user sees an "Error: ..." exit instead of a silent
+    None propagating through the success branch.
+    """
+
+    def test_empty_candidates_raises_gemini_api_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # NOTE: The code at line 751 now checks 'if not response.candidates:' before
-        # any indexing, so empty candidates returns None gracefully rather than raising
-        # IndexError. This test verifies that safe branch.
         import scripts.generate_image as mod
+        from scripts.generate_image import GeminiAPIError
 
         monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
 
         fake_response = MagicMock()
         fake_response.candidates = []
-        # prompt_feedback absent to exercise the hasattr branch
+        # prompt_feedback absent to exercise the getattr default branch
         fake_response.prompt_feedback = None
 
         mock_client_instance = MagicMock()
@@ -739,20 +743,22 @@ class TestGenerateImageEmptyCandidates:
         with (
             patch("scripts.generate_image.genai.Client", mock_client_cls),
             patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+            pytest.raises(GeminiAPIError) as exc_info,
         ):
-            result = mod.generate_image(
+            mod.generate_image(
                 prompt="Empty candidates test",
                 model_key="flash",
                 document_prompt=False,
             )
 
-        assert result is None
+        assert "no response candidates" in str(exc_info.value).lower()
 
     def test_empty_candidates_with_prompt_feedback(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When response has prompt_feedback, it should be printed."""
+        """When response has prompt_feedback, the exception carries it."""
         import scripts.generate_image as mod
+        from scripts.generate_image import GeminiAPIError
 
         monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
 
@@ -767,16 +773,15 @@ class TestGenerateImageEmptyCandidates:
         with (
             patch("scripts.generate_image.genai.Client", mock_client_cls),
             patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+            pytest.raises(GeminiAPIError) as exc_info,
         ):
-            result = mod.generate_image(
+            mod.generate_image(
                 prompt="Safety block test",
                 model_key="flash",
                 document_prompt=False,
             )
 
-        assert result is None
-        out = capsys.readouterr().out
-        assert "feedback" in out.lower() or "safety" in out.lower()
+        assert "SAFETY_BLOCK" in str(exc_info.value)
 
 
 class TestGenerateImageApiKeyMissing:
@@ -802,32 +807,35 @@ class TestGenerateImageApiKeyMissing:
 
 
 class TestGenerateImageUnknownModel:
-    def test_unknown_model_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    def test_unknown_model_raises_config_error(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import scripts.generate_image as mod
+        from scripts.generate_image import ConfigError
 
         monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
 
-        with patch("scripts.generate_image._load_api_key", return_value="fake-key"):
-            result = mod.generate_image(
+        with (
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+            pytest.raises(ConfigError) as exc_info,
+        ):
+            mod.generate_image(
                 prompt="Unknown model test",
                 model_key="nonexistent_model",
                 document_prompt=False,
             )
 
-        assert result is None
-        out = capsys.readouterr().out
-        assert "unknown" in out.lower() or "nonexistent" in out.lower()
+        assert "nonexistent_model" in str(exc_info.value)
 
 
 class TestGenerateImageNoImageData:
-    """When response has candidates but no inline_data, returns None."""
+    """When response has candidates but no inline_data, raises GeminiAPIError."""
 
-    def test_text_only_response_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    def test_text_only_response_raises_gemini_api_error(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import scripts.generate_image as mod
+        from scripts.generate_image import GeminiAPIError
 
         monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
 
@@ -842,16 +850,15 @@ class TestGenerateImageNoImageData:
         with (
             patch("scripts.generate_image.genai.Client", mock_client_cls),
             patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+            pytest.raises(GeminiAPIError) as exc_info,
         ):
-            result = mod.generate_image(
+            mod.generate_image(
                 prompt="Text-only test",
                 model_key="flash",
                 document_prompt=False,
             )
 
-        assert result is None
-        out = capsys.readouterr().out
-        assert "no image data" in out.lower() or "error" in out.lower()
+        assert "no inline image data" in str(exc_info.value).lower()
 
 
 class TestGenerateImageApiException:
@@ -1637,32 +1644,32 @@ class TestGenerateImageVerboseAndThoughts:
 
 
 class TestGenerateStorySequence:
-    def test_zero_parts_returns_empty_list(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    def test_zero_parts_raises_config_error(self) -> None:
+        from scripts.generate_image import ConfigError, generate_story_sequence
+
+        with pytest.raises(ConfigError) as exc_info:
+            generate_story_sequence(base_prompt="A story", num_parts=0)
+
+        assert "at least 1" in str(exc_info.value)
+
+    def test_unknown_model_raises_config_error(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from scripts.generate_image import generate_story_sequence
-
-        result = generate_story_sequence(base_prompt="A story", num_parts=0)
-
-        assert result == []
-        out = capsys.readouterr().out
-        assert "error" in out.lower() or "least 1" in out.lower()
-
-    def test_unknown_model_returns_empty_list(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from scripts.generate_image import generate_story_sequence
+        from scripts.generate_image import ConfigError, generate_story_sequence
 
         monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
 
-        with patch("scripts.generate_image._load_api_key", return_value="fake-key"):
-            result = generate_story_sequence(
+        with (
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+            pytest.raises(ConfigError) as exc_info,
+        ):
+            generate_story_sequence(
                 base_prompt="A story",
                 num_parts=2,
                 model_key="nonexistent",
             )
 
-        assert result == []
+        assert "nonexistent" in str(exc_info.value)
 
     def test_two_part_story_success(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3455,3 +3462,179 @@ class TestDraftModeModelAwareSize:
         out = capsys.readouterr().out
         assert "no size control" in out.lower()
         assert "Generating at 1K" not in out
+
+
+# ---------------------------------------------------------------------------
+# Typed-error contract coverage (PR #39 follow-up tests)
+#
+# These tests anchor the new typed-raise contract introduced in the 2026-05
+# compliance sweep so future refactors that broaden a catch upstream or remove
+# a handler surface as test failures rather than silent regressions.
+# ---------------------------------------------------------------------------
+
+
+class TestFileIOErrorOnDiskWrite:
+    """``generate_image`` wraps an OSError from the output write as ``FileIOError``."""
+
+    def test_oserror_writing_image_raises_file_io_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.generate_image as mod
+        from scripts.generate_image import FileIOError
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        # Build a response carrying valid inline image data so the function
+        # reaches the file-write step.
+        part = _make_fake_part(
+            inline_data=_make_fake_inline_data(b"PNG_BYTES", "image/png")
+        )
+        fake_response = _make_fake_response([part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        # Force the file write to raise OSError by patching ``open`` for write
+        # mode only inside the module's namespace.
+        real_open = open
+
+        def boom(
+            path: Any,
+            mode: str = "r",
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            if "w" in mode and "b" in mode:
+                msg = "simulated disk-full"
+                raise OSError(msg)
+            return real_open(path, mode, *args, **kwargs)
+
+        with (
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+            patch("builtins.open", side_effect=boom),
+            pytest.raises(FileIOError) as exc_info,
+        ):
+            mod.generate_image(
+                prompt="Disk-full test",
+                model_key="flash",
+                output_path=tmp_path / "result.png",
+                document_prompt=False,
+            )
+
+        assert "simulated disk-full" in str(exc_info.value)
+
+
+class TestMainKeyboardInterruptAndUnexpected:
+    """``main()`` distinguishes SIGINT, AppError, and truly unexpected errors."""
+
+    def test_keyboard_interrupt_exits_130(self) -> None:
+        """SIGINT during _run produces exit code 130 (POSIX convention)."""
+        import scripts.generate_image as mod
+
+        with (
+            patch("scripts.generate_image._run", side_effect=KeyboardInterrupt),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code == 130
+
+    def test_unexpected_exception_includes_traceback(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An exception that is not an AppError surfaces as ``Unexpected error``.
+
+        ``exc_info=exc`` on the structlog call preserves the traceback so the
+        user has a real bug report to attach.
+        """
+        import scripts.generate_image as mod
+
+        # A plain RuntimeError is not an AppError, so it hits the outer
+        # ``except Exception`` branch.
+        with (
+            patch(
+                "scripts.generate_image._run",
+                side_effect=RuntimeError("kaboom"),
+            ),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        # Either the structlog-rendered "Unexpected error" prefix or the
+        # exc_info traceback line should be present.
+        assert "unexpected error" in err.lower() or "RuntimeError" in err
+
+    def test_apperror_exits_1_with_message(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A raised AppError produces a clean ``Error: ...`` exit, not a traceback."""
+        import scripts.generate_image as mod
+        from scripts.generate_image import GeminiAPIError
+
+        with (
+            patch(
+                "scripts.generate_image._run",
+                side_effect=GeminiAPIError("synthetic gemini failure"),
+            ),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mod.main()
+
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "synthetic gemini failure" in err
+
+
+class TestSettingsLoaderEdgeCases:
+    """``get_settings()`` translates pydantic/IO errors to ConfigError or warning."""
+
+    def test_env_var_takes_precedence_over_env_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When both are set, the process environment wins, per pydantic-settings."""
+        import scripts.generate_image as mod
+
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "GEMINI_API_KEY=from-dotenv\nTOPAZ_API_KEY=from-dotenv-topaz\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("GEMINI_API_KEY", "from-environ")
+        monkeypatch.delenv("TOPAZ_API_KEY", raising=False)
+        monkeypatch.setattr(mod, "_ENV_FILE", env_path)
+        # SettingsConfigDict is a mutable TypedDict; setitem in-place under
+        # ``monkeypatch`` so the env_file key is restored after the test.
+        monkeypatch.setitem(mod.Settings.model_config, "env_file", str(env_path))
+
+        settings = mod.get_settings()
+
+        # Environment wins for GEMINI_API_KEY; .env supplies TOPAZ_API_KEY.
+        assert settings.GEMINI_API_KEY == "from-environ"
+        assert settings.TOPAZ_API_KEY == "from-dotenv-topaz"
+
+    def test_malformed_env_file_raises_config_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Invalid UTF-8 in .env surfaces as ConfigError, not raw pydantic blob."""
+        import scripts.generate_image as mod
+        from scripts.generate_image import ConfigError
+
+        env_path = tmp_path / ".env"
+        # Invalid UTF-8 byte sequence
+        env_path.write_bytes(b"GEMINI_API_KEY=\xff\xfe\xfd_invalid")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("TOPAZ_API_KEY", raising=False)
+        monkeypatch.setattr(mod, "_ENV_FILE", env_path)
+        monkeypatch.setitem(mod.Settings.model_config, "env_file", str(env_path))
+
+        # python-dotenv reads the file as UTF-8 and raises UnicodeDecodeError
+        # before pydantic ever sees it. ``get_settings`` translates that to a
+        # typed ConfigError so the user never sees a raw decoding traceback.
+        with pytest.raises(ConfigError) as exc_info:
+            mod.get_settings()
+
+        assert "UTF-8" in str(exc_info.value) or "decode" in str(exc_info.value).lower()
