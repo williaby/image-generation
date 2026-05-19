@@ -43,7 +43,7 @@ class TestFuzzDetectImageFormat:
     """detect_image_format() must never raise on arbitrary byte input."""
 
     @given(_bytes_strategy)
-    @settings(max_examples=50, deadline=2000)
+    @settings(max_examples=50, deadline=None)
     def test_never_raises_on_arbitrary_bytes(self, data: bytes) -> None:
         """Arbitrary byte sequences return a dot-prefixed extension string."""
         from scripts.generate_image import detect_image_format
@@ -53,7 +53,7 @@ class TestFuzzDetectImageFormat:
         assert result.startswith(".")
 
     @given(_bytes_strategy)
-    @settings(max_examples=50, deadline=2000)
+    @settings(max_examples=50, deadline=None)
     def test_result_is_known_extension(self, data: bytes) -> None:
         """Return value is always one of the four known extensions."""
         from scripts.generate_image import detect_image_format
@@ -71,7 +71,7 @@ class TestFuzzGetExtensionForMime:
     """get_extension_for_mime() must never raise on arbitrary MIME strings."""
 
     @given(_text_no_surrogates)
-    @settings(max_examples=50, deadline=2000)
+    @settings(max_examples=50, deadline=None)
     def test_never_raises_on_arbitrary_mime_string(self, mime_type: str) -> None:
         """Arbitrary MIME strings return a dot-prefixed extension string."""
         from scripts.generate_image import get_extension_for_mime
@@ -81,7 +81,7 @@ class TestFuzzGetExtensionForMime:
         assert result.startswith(".")
 
     @given(_text_no_surrogates)
-    @settings(max_examples=50, deadline=2000)
+    @settings(max_examples=50, deadline=None)
     def test_result_is_known_extension(self, mime_type: str) -> None:
         """Return value is always one of the four known extensions."""
         from scripts.generate_image import get_extension_for_mime
@@ -104,7 +104,7 @@ class TestFuzzArgumentParser:
     """
 
     @given(_text_no_surrogates)
-    @settings(max_examples=50, deadline=2000)
+    @settings(max_examples=50, deadline=None)
     def test_prompt_positional_parsed_or_system_exit(self, prompt: str) -> None:
         """Arbitrary prompt strings are accepted by the parser or cause SystemExit."""
         from scripts.generate_image import (

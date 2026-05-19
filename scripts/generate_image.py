@@ -68,6 +68,7 @@ import secrets
 import stat
 import sys
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -140,10 +141,22 @@ class _StderrLogger:
     which would leave a captured handle pointing at the original (unwatched)
     stream. Resolving the stream at call time is the simplest way to keep
     structured logging without breaking ``capsys`` based assertions.
+
+    ``exception`` is implemented separately from ``msg`` so that calling
+    ``log.exception(...)`` outside structlog's processor chain still emits a
+    traceback. Inside structlog's processor chain, ConsoleRenderer renders
+    ``exc_info`` into the message string before this method runs, so the
+    ``traceback.print_exc()`` fallback below is a no-op in that path; it
+    becomes load-bearing only when callers bypass structlog (uncommon but
+    not impossible during teardown / monkeypatch scenarios).
     """
 
     def msg(self, message: str) -> None:
         print(message, file=sys.stderr)
+
+    def exception(self, message: str) -> None:
+        print(message, file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
 
     log = msg
     debug = msg
@@ -154,7 +167,6 @@ class _StderrLogger:
     err = msg
     critical = msg
     fatal = msg
-    exception = msg
 
 
 class _StderrLoggerFactory:
@@ -1989,14 +2001,15 @@ def main() -> None:
     except KeyboardInterrupt:
         log.error("Interrupted.")
         sys.exit(130)
-    except Exception as exc:
-        # ``exc_info=exc`` preserves the traceback in the structlog event so
-        # users have a real bug report to attach. Without it the user only
-        # sees a one-line ``str(exc)`` with no file/line, which makes the
-        # "is this a bug, please report it" instruction unactionable.
-        log.error(
-            "Unexpected error (please report as a bug, include the traceback below)",
-            exc_info=exc,
+    except Exception:
+        # ``log.exception`` is the idiomatic preserve-traceback path: it
+        # captures ``sys.exc_info()`` automatically and either renders the
+        # traceback via structlog's ConsoleRenderer (the configured path) or
+        # via the ``_StderrLogger.exception`` fallback that calls
+        # ``traceback.print_exc``. Users need the full traceback so the "this
+        # is a bug, please report it" instruction is actionable.
+        log.exception(
+            "Unexpected error (please report as a bug, include the traceback below)"
         )
         sys.exit(1)
 
