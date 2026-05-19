@@ -504,20 +504,31 @@ def topaz_enhance_image(
     face_enhancement: bool = False,
     face_enhancement_strength: float | None = None,
     verbose: bool = False,
-) -> Path | None:
+) -> Path:
     """Enhance an image using the Topaz Labs API (async job with polling).
 
     Precision models (Gigapixel family): 24 MP per credit.
     Generative models (Wonder, Bloom): 2-4 MP per credit, significantly more expensive.
+
+    Raises:
+        ConfigError: invalid input arguments (unknown model, bad output
+            format, strength out of range, face-strength without face flag).
+        FileIOError: input file missing / not a regular file / over size cap,
+            or output write failure.
+        TopazAPIError: Topaz API transport, HTTP, JSON, or status failure;
+            also covers SSRF allowlist rejection and missing httpx runtime.
     """
     if not HTTPX_AVAILABLE:
-        log.error("Error: 'httpx' package is required for Topaz enhancement.")
-        log.error("Install with: pip install httpx")
-        return None
+        raise TopazAPIError(
+            "'httpx' package is required for Topaz enhancement. "
+            "Install with: pip install httpx"
+        )
 
     api_key = get_topaz_api_key()
     if not api_key:
-        return None
+        raise ConfigError(
+            "TOPAZ_API_KEY is not set. Set it via the environment or .env file."
+        )
 
     # stat() also covers the "missing file" case via FileNotFoundError,
     # which is a subclass of OSError. The explicit exists() check was
@@ -527,57 +538,43 @@ def topaz_enhance_image(
     # files where st_size is meaningless and would bypass the size cap.
     try:
         resolved_stat = input_path.resolve().stat()
-    except FileNotFoundError:
-        log.error(f"Error: Input image not found: {input_path}")
-        return None
-    except OSError as e:
-        log.error(f"Error: Cannot stat input image {input_path}: {e}")
-        return None
+    except FileNotFoundError as exc:
+        raise FileIOError(f"Input image not found: {input_path}") from exc
+    except OSError as exc:
+        raise FileIOError(f"Cannot stat input image {input_path}: {exc}") from exc
     if not stat.S_ISREG(resolved_stat.st_mode):
-        log.error(f"Error: Input image {input_path} is not a regular file.")
-        return None
+        raise FileIOError(f"Input image {input_path} is not a regular file.")
     input_size = resolved_stat.st_size
     if input_size > MAX_INPUT_IMAGE_BYTES:
-        log.error(
-            f"Error: Input image {input_path} is {input_size} bytes; "
+        raise FileIOError(
+            f"Input image {input_path} is {input_size} bytes; "
             f"exceeds limit of {MAX_INPUT_IMAGE_BYTES} bytes."
         )
-        return None
 
     model_config = TOPAZ_MODELS.get(model)
     if model_config is None:
-        log.error(f"Error: Unknown Topaz model '{model}'.")
-        log.error(f"Available: {', '.join(TOPAZ_MODELS)}")
-        return None
+        raise ConfigError(
+            f"Unknown Topaz model '{model}'. Available: {', '.join(TOPAZ_MODELS)}"
+        )
 
     valid_formats = ("png", "jpg", "jpeg", "webp")
     if output_format not in valid_formats:
-        log.error(
-            f"Error: output_format must be one of {valid_formats}, "
-            f"got '{output_format}'"
+        raise ConfigError(
+            f"output_format must be one of {valid_formats}, got '{output_format}'"
         )
-        return None
 
-    def _check_strength(name: str, value: float | None) -> bool:
+    def _check_strength(name: str, value: float | None) -> None:
         if value is not None and not (0.0 <= value <= 1.0):
-            log.error(f"Error: {name} must be between 0.0 and 1.0, got {value}")
-            return False
-        return True
+            raise ConfigError(f"{name} must be between 0.0 and 1.0, got {value}")
 
-    if not all(
-        [
-            _check_strength("sharpen", sharpen),
-            _check_strength("denoise", denoise),
-            _check_strength("face_enhancement_strength", face_enhancement_strength),
-        ]
-    ):
-        return None
+    _check_strength("sharpen", sharpen)
+    _check_strength("denoise", denoise)
+    _check_strength("face_enhancement_strength", face_enhancement_strength)
 
     if face_enhancement_strength is not None and not face_enhancement:
-        log.error(
-            "Error: --topaz-face-strength requires --topaz-face-enhance to be set."
+        raise ConfigError(
+            "--topaz-face-strength requires --topaz-face-enhance to be set."
         )
-        return None
 
     # #CRITICAL: API key sent as X-API-KEY header; never log headers containing this value.
     # #VERIFY   -- Audit log handler config before enabling debug logging.
@@ -622,42 +619,37 @@ def topaz_enhance_image(
                 timeout=30,
             )
         resp.raise_for_status()
-    except httpx.HTTPError as e:
-        log.error(f"Error submitting Topaz job (transport): {e}")
-        return None
-    except OSError as e:
-        log.error(f"Error reading Topaz input file: {e}")
-        return None
+    except httpx.HTTPError as exc:
+        raise TopazAPIError(f"Error submitting Topaz job (transport): {exc}") from exc
+    except OSError as exc:
+        raise FileIOError(f"Error reading Topaz input file: {exc}") from exc
 
     try:
         submit_payload = resp.json()
-    except ValueError as e:
-        log.error(
-            f"Error: Topaz submit returned non-JSON body "
-            f"(status={resp.status_code}): {e}; "
+    except ValueError as exc:
+        raise TopazAPIError(
+            f"Topaz submit returned non-JSON body "
+            f"(status={resp.status_code}): {exc}; "
             f"body[:200]={resp.text[:200]!r}"
-        )
-        return None
+        ) from exc
 
     if not isinstance(submit_payload, dict):
         # Defend against a top-level JSON value that is not a JSON object
         # (array, scalar, `null`); `.get(...)` would raise `AttributeError`
         # which is not in any catch clause above.
-        log.error(
-            f"Error: Topaz submit response was not a JSON object "
+        raise TopazAPIError(
+            f"Topaz submit response was not a JSON object "
             f"(got {type(submit_payload).__name__}): "
             f"body[:200]={resp.text[:200]!r}"
         )
-        return None
 
     process_id = submit_payload.get("process_id")
     if not process_id:
-        log.error(
-            f"Error: Topaz API returned unexpected response "
+        raise TopazAPIError(
+            f"Topaz API returned unexpected response "
             f"(missing process_id, keys={sorted(submit_payload)[:10]}): "
             f"{resp.text[:200]}"
         )
-        return None
     if verbose:
         print(f"  Job submitted: {process_id}")
 
@@ -686,29 +678,27 @@ def topaz_enhance_image(
                 continue
             status_resp.raise_for_status()
             status_payload = status_resp.json()
-        except (httpx.HTTPError, ValueError) as e:
-            log.error(f"Error polling Topaz status for job {process_id}: {e}")
-            return None
+        except (httpx.HTTPError, ValueError) as exc:
+            raise TopazAPIError(
+                f"Error polling Topaz status for job {process_id}: {exc}"
+            ) from exc
         if not isinstance(status_payload, dict):
-            log.error(
-                f"Error: Topaz status response for job {process_id} was "
+            raise TopazAPIError(
+                f"Topaz status response for job {process_id} was "
                 f"not a JSON object (got {type(status_payload).__name__})"
             )
-            return None
         status = status_payload.get("status", "")
         if verbose:
             print(f"  Status: {status}")
         if status == "Completed":
             break
         if status in ("Failed", "Error"):
-            log.error(f"Error: Topaz job {process_id} failed (status: {status})")
-            return None
+            raise TopazAPIError(f"Topaz job {process_id} failed (status: {status})")
         wait = min(wait * 1.5, 15)
     else:
-        log.error(
-            f"Error: Topaz job {process_id} did not complete within the polling limit."
+        raise TopazAPIError(
+            f"Topaz job {process_id} did not complete within the polling limit."
         )
-        return None
 
     # Get download URL -- same split-try pattern as the submit block above:
     # network errors first, then JSON parse errors with dl_resp provably bound.
@@ -719,54 +709,51 @@ def topaz_enhance_image(
             timeout=15,
         )
         dl_resp.raise_for_status()
-    except httpx.HTTPError as e:
-        log.error(
-            f"Error getting Topaz download URL for job {process_id} (transport): {e}"
-        )
-        return None
+    except httpx.HTTPError as exc:
+        raise TopazAPIError(
+            f"Error getting Topaz download URL for job {process_id} (transport): {exc}"
+        ) from exc
 
     try:
         dl_payload = dl_resp.json()
-    except ValueError as e:
-        log.error(
-            f"Error: Topaz download URL response was non-JSON for job "
-            f"{process_id} (status={dl_resp.status_code}): {e}; "
+    except ValueError as exc:
+        raise TopazAPIError(
+            f"Topaz download URL response was non-JSON for job "
+            f"{process_id} (status={dl_resp.status_code}): {exc}; "
             f"body[:200]={dl_resp.text[:200]!r}"
-        )
-        return None
+        ) from exc
 
     if not isinstance(dl_payload, dict):
-        log.error(
-            f"Error: Topaz download URL response for job {process_id} was "
+        raise TopazAPIError(
+            f"Topaz download URL response for job {process_id} was "
             f"not a JSON object (got {type(dl_payload).__name__}): "
             f"body[:200]={dl_resp.text[:200]!r}"
         )
-        return None
 
     download_url = dl_payload.get("url")
     if not download_url:
-        log.error(f"Error: Topaz download response missing URL for job {process_id}")
-        return None
+        raise TopazAPIError(f"Topaz download response missing URL for job {process_id}")
 
     # #ASSUME: download_url is a valid HTTPS URL served from api.topazlabs.com or its CDN.
     # #VERIFY   -- Check Topaz CDN policy if infrastructure change announced.
     _parsed = urlparse(download_url)
     if _parsed.scheme != "https" or _parsed.hostname not in TOPAZ_DOWNLOAD_HOSTS:
-        log.error(f"Error: Topaz returned unexpected download URL: {download_url!r}")
-        return None
+        raise TopazAPIError(f"Topaz returned unexpected download URL: {download_url!r}")
 
     # Download the enhanced image
     try:
         img_resp = httpx.get(download_url, timeout=120, follow_redirects=False)
         img_resp.raise_for_status()
         image_data = img_resp.content
-    except httpx.HTTPError as e:
-        log.error(f"Error downloading Topaz result for job {process_id}: {e}")
-        return None
+    except httpx.HTTPError as exc:
+        raise TopazAPIError(
+            f"Error downloading Topaz result for job {process_id}: {exc}"
+        ) from exc
 
     if not image_data:
-        log.error(f"Error: Topaz download returned empty response for job {process_id}")
-        return None
+        raise TopazAPIError(
+            f"Topaz download returned empty response for job {process_id}"
+        )
 
     # Resolve output path
     if output_path is None:
@@ -789,9 +776,10 @@ def topaz_enhance_image(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "wb") as f:
             f.write(image_data)
-    except OSError as e:
-        log.error(f"Error writing output file {output_path}: {e}")
-        return None
+    except OSError as exc:
+        raise FileIOError(
+            f"Error writing Topaz output file {output_path}: {exc}"
+        ) from exc
 
     print(f"Topaz result saved to: {output_path}")
     return output_path
@@ -1763,8 +1751,12 @@ Examples:
         sys.exit(1)
 
     # --- Standalone Topaz enhancement mode ---
+    # On failure, topaz_enhance_image raises a typed AppError that main()
+    # catches and surfaces as exit code 1; on success the function always
+    # returns a real Path, so a separate truthiness check is no longer
+    # needed.
     if args.enhance:
-        result = topaz_enhance_image(
+        topaz_enhance_image(
             input_path=args.enhance,
             output_path=args.output,
             model=args.topaz_model,
@@ -1774,7 +1766,7 @@ Examples:
             face_enhancement_strength=args.topaz_face_strength,
             verbose=args.verbose,
         )
-        sys.exit(0 if result else 1)
+        sys.exit(0)
 
     # Check for google-genai package
     if not GENAI_AVAILABLE:
@@ -1802,6 +1794,8 @@ Examples:
             output_path = args.finalize.parent / f"{args.finalize.stem}_final.png"
 
         # --- Topaz finalization path ---
+        # Same as the standalone --enhance branch: typed AppError on
+        # failure propagates to main(); on success result is a Path.
         if args.topaz:
             print(f"Finalizing draft image via Topaz: {args.finalize}")
             print(f"Topaz model: {args.topaz_model}")
@@ -1816,14 +1810,13 @@ Examples:
                 verbose=args.verbose,
             )
 
-            if result:
-                print(f"\n{'=' * 60}")
-                print("Topaz finalization complete!")
-                print(f"Draft: {args.finalize}")
-                print(f"Final: {result}")
-                print(f"{'=' * 60}")
+            print(f"\n{'=' * 60}")
+            print("Topaz finalization complete!")
+            print(f"Draft: {args.finalize}")
+            print(f"Final: {result}")
+            print(f"{'=' * 60}")
 
-            sys.exit(0 if result else 1)
+            sys.exit(0)
 
         # --- Gemini finalization path ---
         final_size = args.size or "2K"
@@ -1897,18 +1890,25 @@ Examples:
         if args.topaz and results:
             print(f"\nApplying Topaz enhancement to {len(results)} image(s)...")
             enhanced = []
+            # Catch per-image so a single failure does not abort the batch.
+            # ConfigError propagates because misconfiguration applies to
+            # every image in the batch -- recovering would just produce
+            # N identical errors.
             for path in results:
-                r = topaz_enhance_image(
-                    input_path=path,
-                    model=args.topaz_model,
-                    sharpen=args.topaz_sharpen,
-                    denoise=args.topaz_denoise,
-                    face_enhancement=args.topaz_face_enhance,
-                    face_enhancement_strength=args.topaz_face_strength,
-                    verbose=args.verbose,
-                )
-                if r:
-                    enhanced.append(r)
+                try:
+                    enhanced.append(
+                        topaz_enhance_image(
+                            input_path=path,
+                            model=args.topaz_model,
+                            sharpen=args.topaz_sharpen,
+                            denoise=args.topaz_denoise,
+                            face_enhancement=args.topaz_face_enhance,
+                            face_enhancement_strength=args.topaz_face_strength,
+                            verbose=args.verbose,
+                        )
+                    )
+                except (TopazAPIError, FileIOError) as exc:  # noqa: PERF203 - per-image recovery is the point of the loop
+                    log.error(f"Topaz enhancement failed for {path}: {exc}")
             results = enhanced
 
         sys.exit(0 if len(results) == args.story_parts else 1)
@@ -1963,6 +1963,11 @@ Examples:
         )
 
         if result and args.topaz:
+            # Single-image path: typed AppError propagates to main(); on
+            # success ``topaz_enhance_image`` returns a Path. The previous
+            # ``result and args.topaz`` guard already short-circuits when
+            # generate_image returned None for a non-error empty-response
+            # path, so we do not need an extra except here.
             result = topaz_enhance_image(
                 input_path=result,
                 model=args.topaz_model,
