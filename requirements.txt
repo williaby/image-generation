@@ -28,3 +28,8 @@ structlog>=24.0.0,<26.0.0
 # streaming API), both fixed in 2.7.0. urllib3 may be pulled transitively by
 # other dependencies; the explicit pin ensures a patched version is resolved.
 urllib3>=2.7.0,<3.0.0
+
+# Pinned to address CVE-2026-45409. idna is pulled transitively (via httpx and
+# the google-genai stack); the explicit floor ensures a patched version (3.15)
+# is resolved regardless of what a transitive dependency requests.
+idna>=3.15

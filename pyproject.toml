@@ -20,6 +20,10 @@ dependencies = [
     # pulled transitively by other dependencies; the explicit pin ensures the
     # resolver picks a patched version regardless.
     "urllib3>=2.7.0,<3.0.0",
+    # Pinned to address CVE-2026-45409. idna is pulled transitively (via httpx
+    # and the google-genai stack); the explicit floor ensures the resolver
+    # picks the patched 3.15 regardless of what a transitive dependency requests.
+    "idna>=3.15",
 ]
 
 [project.urls]

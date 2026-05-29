@@ -7,13 +7,13 @@
 
 This directory contains the CLI entry point and its supporting modules:
 
-- `generate_image.py` (~1800 lines) — the sole CLI surface for image generation
+- `generate_image.py` (~1800 lines) - the sole CLI surface for image generation
   and Topaz enhancement, plus the application-service functions
   (`generate_image`, `topaz_enhance_image`, settings/API-key loading) and their
   extracted helpers.
-- `_config.py` — pure configuration/data and the `AppError` hierarchy (model
+- `_config.py` - pure configuration/data and the `AppError` hierarchy (model
   registries, validation constants, exception classes). No behavior, no I/O.
-- `_images.py` — pure image-format helpers (`detect_image_format`,
+- `_images.py` - pure image-format helpers (`detect_image_format`,
   `get_extension_for_mime`).
 
 `generate_image.py` re-imports the public names from `_config` and `_images`, so

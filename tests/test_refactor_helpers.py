@@ -12,13 +12,33 @@ Covers:
 - The Topaz polling helper's terminal behaviors (completed / failed / timeout).
 """
 
+import base64
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
 import pytest
+
+
+def _mock_response(
+    status_code: int = 200,
+    json_data: dict | None = None,
+    content: bytes = b"",
+    text: str = "",
+) -> MagicMock:
+    """Build an httpx.Response-like mock (mirrors test_topaz_enhance helper)."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = json_data or {}
+    resp.content = content
+    resp.text = text
+    resp.raise_for_status = MagicMock()  # no-op by default
+    return resp
 
 
 class TestLoadImageBytes:
     """load_image_bytes returns raw bytes + detected mime and enforces the cap."""
 
-    def test_returns_raw_bytes_and_mime(self, tmp_path):
+    def test_returns_raw_bytes_and_mime(self, tmp_path: Path) -> None:
         from scripts import generate_image as mod
 
         raw = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
@@ -31,7 +51,9 @@ class TestLoadImageBytes:
         assert isinstance(data, bytes)
         assert mime == "image/png"
 
-    def test_oversize_raises_value_error(self, tmp_path, monkeypatch):
+    def test_oversize_raises_value_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from scripts import generate_image as mod
 
         monkeypatch.setattr(mod, "MAX_INPUT_IMAGE_BYTES", 16)
@@ -41,9 +63,7 @@ class TestLoadImageBytes:
         with pytest.raises(ValueError, match="exceeds limit"):
             mod.load_image_bytes(big)
 
-    def test_base64_wrapper_matches_bytes_loader(self, tmp_path):
-        import base64
-
+    def test_base64_wrapper_matches_bytes_loader(self, tmp_path: Path) -> None:
         from scripts import generate_image as mod
 
         raw = b"\xff\xd8\xff\xe0" + b"\x00" * 12  # JPEG magic
@@ -60,20 +80,20 @@ class TestLoadImageBytes:
 class TestReexportContract:
     """Public config/image names are the same object via both import paths."""
 
-    def test_exceptions_are_identical_objects(self):
+    def test_exceptions_are_identical_objects(self) -> None:
         from scripts import _config, generate_image
 
         assert generate_image.ConfigError is _config.ConfigError
         assert generate_image.AppError is _config.AppError
         assert issubclass(_config.ConfigError, _config.AppError)
 
-    def test_image_helpers_are_identical_objects(self):
+    def test_image_helpers_are_identical_objects(self) -> None:
         from scripts import _images, generate_image
 
         assert generate_image.detect_image_format is _images.detect_image_format
         assert generate_image.get_extension_for_mime is _images.get_extension_for_mime
 
-    def test_model_registry_shared(self):
+    def test_model_registry_shared(self) -> None:
         from scripts import _config, generate_image
 
         assert generate_image.MODELS is _config.MODELS
@@ -83,7 +103,7 @@ class TestReexportContract:
 class TestConfigureLoggingIdempotent:
     """_configure_logging can be called repeatedly without error (RAD #VERIFY)."""
 
-    def test_repeated_calls_are_safe(self, capsys):
+    def test_repeated_calls_are_safe(self, capsys: pytest.CaptureFixture[str]) -> None:
         from scripts import generate_image as mod
 
         mod._configure_logging(verbose=False)
@@ -98,53 +118,41 @@ class TestConfigureLoggingIdempotent:
 class TestPollTopazStatus:
     """_poll_topaz_status terminal behaviors."""
 
-    def _resp(self, *, status_code=200, payload=None):
-        class _R:
-            def __init__(self, code, data):
-                self.status_code = code
-                self._data = data
-
-            def raise_for_status(self):
-                if self.status_code >= 400:
-                    import httpx
-
-                    raise httpx.HTTPStatusError("err", request=None, response=None)
-
-            def json(self):
-                return self._data
-
-        return _R(status_code, payload)
-
-    def test_completed_returns_none(self, monkeypatch):
+    @patch("scripts.generate_image.time.sleep")
+    def test_completed_returns_none(self, mock_sleep: MagicMock) -> None:
         from scripts import generate_image as mod
 
-        completed = self._resp(payload={"status": "Completed"})
-        monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
-        monkeypatch.setattr(mod.httpx, "get", lambda *_a, **_k: completed)
-        # returns without raising
-        assert mod._poll_topaz_status("pid", {"X-API-KEY": "k"}, verbose=False) is None
+        completed = _mock_response(json_data={"status": "Completed"})
+        with patch(
+            "scripts.generate_image.httpx.get", MagicMock(return_value=completed)
+        ):
+            result = mod._poll_topaz_status("pid", {"X-API-KEY": "k"}, verbose=False)
+        assert result is None
 
-    def test_failed_status_raises(self, monkeypatch):
+    @patch("scripts.generate_image.time.sleep")
+    def test_failed_status_raises(self, mock_sleep: MagicMock) -> None:
         from scripts import generate_image as mod
 
-        monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
-        monkeypatch.setattr(
-            mod.httpx,
-            "get",
-            lambda *_a, **_k: self._resp(payload={"status": "Failed"}),
-        )
-        with pytest.raises(mod.TopazAPIError, match="failed"):
+        failed = _mock_response(json_data={"status": "Failed"})
+        with (
+            patch("scripts.generate_image.httpx.get", MagicMock(return_value=failed)),
+            pytest.raises(mod.TopazAPIError, match="failed"),
+        ):
             mod._poll_topaz_status("pid", {"X-API-KEY": "k"}, verbose=False)
 
-    def test_timeout_exhausts_iterations(self, monkeypatch):
+    @patch("scripts.generate_image.time.sleep")
+    def test_timeout_exhausts_iterations(
+        self, mock_sleep: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from scripts import generate_image as mod
 
-        monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
         monkeypatch.setattr(mod, "_TOPAZ_POLL_ITERATIONS", 3)
-        monkeypatch.setattr(
-            mod.httpx,
-            "get",
-            lambda *_a, **_k: self._resp(payload={"status": "Processing"}),
-        )
-        with pytest.raises(mod.TopazAPIError, match="did not complete"):
+        processing = _mock_response(json_data={"status": "Processing"})
+        with (
+            patch(
+                "scripts.generate_image.httpx.get",
+                MagicMock(return_value=processing),
+            ),
+            pytest.raises(mod.TopazAPIError, match="did not complete"),
+        ):
             mod._poll_topaz_status("pid", {"X-API-KEY": "k"}, verbose=False)
