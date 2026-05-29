@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (dependency consolidation, 2026-05-29)
+
+- `pyproject.toml` is now the single dependency manifest. `requirements.txt`
+  was removed and the Renovate `pip_requirements` manager disabled. The dual
+  manifest produced mutually exclusive `google-genai` constraints twice
+  (PR #26 and PR #38); a single source of truth removes that failure class.
+- Bumped `google-genai` from `>=2.2.0,<2.3.0` to `>=2.7.0,<3.0.0` (lock
+  resolves 2.7.0). The wider ceiling lets minor and patch releases flow
+  without a manual constraint edit.
+- Pinned `idna>=3.15,<4.0.0` (lock resolves 3.17) to clear CVE-2026-45409.
+  See `docs/known-vulnerabilities.md`.
+
 ### Changed (PR follow-up, 2026-05-19)
 
 - **BREAKING:** `topaz_enhance_image` now raises typed `AppError` subclasses on

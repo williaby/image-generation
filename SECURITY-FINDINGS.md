@@ -2,7 +2,7 @@
 
 Review scope: `scripts/generate_image.py` (the only application code in the
 repository), the GitHub Actions workflows under `.github/workflows/`, and the
-declared dependency surface (`pyproject.toml`, `requirements.txt`).
+declared dependency surface (`pyproject.toml`).
 
 Date: 2026-05-15
 Branch reviewed: `claude/security-review-image-gen-4iVzL`
