@@ -2,10 +2,14 @@
 
 Review scope: `scripts/generate_image.py` (the only application code in the
 repository), the GitHub Actions workflows under `.github/workflows/`, and the
-declared dependency surface (`pyproject.toml`).
+declared dependency surface (`pyproject.toml`, with exact versions pinned in
+`uv.lock`).
 
 Date: 2026-05-15
 Branch reviewed: `claude/security-review-image-gen-4iVzL`
+Dependency-surface section (2.5) updated 2026-05-29: `requirements.txt` removed,
+so `pyproject.toml` plus `uv.lock` are the sole manifests; inventory aligned to
+current constraints.
 
 ## 1. Architecture and threat model
 
@@ -16,7 +20,7 @@ Branch reviewed: `claude/security-review-image-gen-4iVzL`
   (`TOPAZ_API_KEY`) from environment variables, with a fallback to a
   `.env` file in the repository root.
 - Calls the Google Gemini API (`google-genai` SDK) for image generation.
-- Optionally calls the Topaz Labs REST API (`requests`) for post-processing.
+- Optionally calls the Topaz Labs REST API (`httpx`) for post-processing.
 - Writes generated images to the local `output/` directory.
 
 There is **no HTTP server, no REST endpoint, no multi-tenant boundary, and
@@ -193,14 +197,18 @@ Outstanding (recommend follow-up, not auto-applied):
 
 ### 2.5 Dependency surface
 
-Declared runtime dependencies:
+Declared runtime dependencies (from `pyproject.toml`):
 
-- `google-genai>=0.4.0,<2.0.0`
-- `requests>=2.32.0,<3.0.0`
+- `google-genai>=2.7.0,<3.0.0`
+- `httpx>=0.27.0,<1.0.0`
+- `pydantic-settings>=2.0.0,<3.0.0`
+- `structlog>=24.0.0,<26.0.0`
+- `urllib3>=2.7.0,<3.0.0` (CVE pin; see below)
+- `idna>=3.15,<4.0.0` (CVE pin; CVE-2026-45409)
 
-Both are bounded by upper version ceilings. `docs/known-vulnerabilities.md`
-records a clean `pip-audit` as of 2026-04-18 with the next review due
-2026-06-17.
+All are bounded by upper version ceilings. `docs/known-vulnerabilities.md`
+records a clean `pip-audit` as of 2026-05-29 with the next review due
+2026-07-28.
 
 Transitive dependency update relevant to this review:
 
