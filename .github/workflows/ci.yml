@@ -62,13 +62,37 @@ jobs:
         run: uv run basedpyright scripts tests
 
       - name: Run tests with coverage
+        # --cov-fail-under makes the 80% gate explicit in CI rather than relying
+        # only on [tool.coverage.report] fail_under; both agree at 80.
         run: |
           uv run pytest \
             --cov=scripts \
             --cov=tests \
             --cov-branch \
+            --cov-fail-under=80 \
             --cov-report=xml \
             --cov-report=term
+
+      - name: Security scan (bandit)
+        # Explicit, repo-controlled bandit run using [tool.bandit] in
+        # pyproject.toml. The org reusable security workflow keeps run-bandit
+        # disabled; this step is the blocking bandit gate.
+        run: uv run bandit -c pyproject.toml -r scripts/
+
+      - name: Docstring coverage (interrogate)
+        # Run via uvx as an isolated tool: interrogate depends on `py`
+        # (PYSEC-2022-42969, no fix), which must not enter the project env.
+        # Version matches the pinned pre-commit hook.
+        run: uvx interrogate@1.7.0 --fail-under=80 scripts/
+
+      - name: Secret scan (detect-secrets)
+        # Fails if any tracked file contains a secret not recorded in
+        # .secrets.baseline. Mirrors the pre-commit detect-secrets hook; run as
+        # an isolated tool so it does not enter the project dependency surface.
+        run: |
+          git ls-files -z \
+            | grep -zv '^\.secrets\.baseline$' \
+            | xargs -0 uvx --from 'detect-secrets==1.5.0' detect-secrets-hook --baseline .secrets.baseline
 
       - name: Dependency audit (pip-audit)
         # Advisory-only findings are non-blocking; confirmed CVEs fail the build.

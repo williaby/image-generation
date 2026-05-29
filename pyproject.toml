@@ -42,6 +42,10 @@ dev = [
     "pip-audit>=2.7.0",
     "hypothesis>=6.0.0,<7.0.0",
 ]
+# interrogate and detect-secrets are intentionally NOT project dependencies:
+# interrogate pulls `py` (PYSEC-2022-42969, unmaintained, no fix), which would
+# fail the pip-audit gate. CI runs both as isolated tools via uvx (see ci.yml),
+# matching how pre-commit runs them in their own environments.
 
 [tool.ruff]
 line-length = 88
