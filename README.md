@@ -49,8 +49,8 @@ git clone https://github.com/williaby/image-generation.git
 cd image-generation
 
 # Install uv if not already present: https://docs.astral.sh/uv/
-# Sync all dependencies (google-genai, httpx, pydantic-settings, structlog)
-# plus the dev tools into a managed virtual environment.
+# Sync all runtime and dev dependencies (declared in pyproject.toml) into a
+# managed virtual environment.
 uv sync --all-extras
 ```
 
