@@ -439,8 +439,14 @@ def _fetch_topaz_download_url(process_id: str, headers: dict[str, str]) -> str:
         )
 
     download_url = dl_payload.get("url")
-    if not download_url:
-        raise TopazAPIError(f"Topaz download response missing URL for job {process_id}")
+    # Require a non-empty string: a truthy non-string value (e.g. a JSON
+    # object/array) would otherwise reach urlparse() and raise TypeError,
+    # bypassing the typed TopazAPIError path.
+    if not isinstance(download_url, str) or not download_url:
+        raise TopazAPIError(
+            f"Topaz download response missing or non-string URL for job "
+            f"{process_id} (got {type(download_url).__name__})"
+        )
 
     # #ASSUME: download_url is a valid HTTPS URL served from api.topazlabs.com
     # or its CDN.
