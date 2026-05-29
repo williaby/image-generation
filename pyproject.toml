@@ -113,12 +113,19 @@ ignore = [
 #   introspection uses function names for reporting. ARG001/ARG002 are suppressed
 #   because pytest fixture parameters appear as "unused" to static analysis.
 #
-# scripts/generate_image.py: legacy CLI script with extensive boolean flag API,
-#   dynamic try/except imports, and complexity that predates current rule set.
-#   PTH123 (open() -> Path.open()), C901 (complexity), D* (docstring style),
-#   N806 (variable names), PLW2901 (loop var), and ARG001 are all tracked for
-#   a dedicated cleanup pass outside this compliance audit (GCA-001 follow-on).
-#   T20 (print) is expected for a CLI tool producing user-facing output.
+# scripts/generate_image.py: CLI script with an extensive boolean flag API and
+#   dynamic try/except imports. The GCA-001 follow-on extracted helpers
+#   (_build_contents, _build_generate_config, _resolve_generated_output_path,
+#   _poll_topaz_status, _fetch_topaz_download_url, _download_topaz_image,
+#   _resolve_topaz_output_path, _build_arg_parser) and config/image-utility
+#   modules (scripts/_config.py, scripts/_images.py), which materially reduced
+#   per-function complexity. C901 / PLR are still suppressed because residual
+#   complexity remains in the response-parsing and CLI-dispatch paths and,
+#   critically, the wide boolean-flag signatures keep tripping PLR0913
+#   (too-many-args); fully clearing those requires the separately-tracked
+#   request/options-object refactor (FBT). PTH123 (open() -> Path.open()) and
+#   D* (docstring style) are tracked separately. T20 (print) is expected for a
+#   CLI producing user-facing output.
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
     "S101",                    # asserts are fine in tests
@@ -141,12 +148,13 @@ ignore = [
     "TRY",                     # exception flow predates TRY rules
     "BLE",                     # blind-except in error reporting paths
     "EM",                      # error-message formatting style legacy
-    "PLR",                     # complexity refactor deferred
+    "PLR",                     # PLR0913 (too-many-args) is inherent to the
+                               # boolean-flag API; PLR2004/0912/0915 residual
     "TCH",                     # imports load at module scope by design
     "ERA",                     # commented-out reference code retained
     "T20",                     # CLI tool -- print() is user-facing output, not debug
     "PTH123",                  # pathlib migration deferred to cleanup pass
-    "C901",                    # complexity refactor tracked separately
+    "C901",                    # residual complexity in dispatch/parse paths
     "D",                       # docstring style cleanup tracked separately
     "N806",                    # variable naming cleanup tracked separately
     "PLW2901",                 # loop variable overwrite tracked separately

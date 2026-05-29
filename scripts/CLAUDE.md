@@ -5,10 +5,26 @@
 
 ## Directory contents
 
-This directory contains a single production entry point:
-`generate_image.py` (1700+ lines). It is the sole CLI surface for image
-generation and Topaz enhancement. New files added here should be treated as
-production code and held to the same standards.
+This directory contains the CLI entry point and its supporting modules:
+
+- `generate_image.py` (~1800 lines) — the sole CLI surface for image generation
+  and Topaz enhancement, plus the application-service functions
+  (`generate_image`, `topaz_enhance_image`, settings/API-key loading) and their
+  extracted helpers.
+- `_config.py` — pure configuration/data and the `AppError` hierarchy (model
+  registries, validation constants, exception classes). No behavior, no I/O.
+- `_images.py` — pure image-format helpers (`detect_image_format`,
+  `get_extension_for_mime`).
+
+`generate_image.py` re-imports the public names from `_config` and `_images`, so
+both `from scripts.generate_image import ConfigError` and
+`from scripts._config import ConfigError` resolve to the same objects, and the
+test suite's `scripts.generate_image.*` patch targets keep working.
+
+New files added here should be treated as production code and held to the same
+standards. Logging is configured by the entry point (`main`), not at import
+time; tests rely on the autouse `configure_logging` fixture in
+`tests/conftest.py`.
 
 ## Ruff per-file-ignore policy
 
@@ -44,8 +60,9 @@ replace deliberate `print()` calls with `structlog.info()`.
 
 ## Error hierarchy
 
-The `AppError` hierarchy defined in `generate_image.py` is the single source
-of structured error signaling for this CLI:
+The `AppError` hierarchy defined in `_config.py` (and re-exported from
+`generate_image.py`) is the single source of structured error signaling for
+this CLI:
 
 ```
 AppError                  # base; main() catches this for clean stderr + exit 1
