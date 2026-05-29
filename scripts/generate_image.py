@@ -1034,7 +1034,11 @@ def _resolve_generated_output_path(
     allowed_root = (script_dir / "output").resolve()
     try:
         resolved_out = output_path.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
+        # OSError: filesystem-level failures. RuntimeError: symlink loops
+        # (``Path.resolve`` raises this on an infinite resolution path). Either
+        # way, an unresolvable path is treated as "not under output/" and
+        # re-anchored into the safe tree below rather than crashing the CLI.
         resolved_out = None
     if resolved_out is None or not resolved_out.is_relative_to(allowed_root):
         if is_draft:
