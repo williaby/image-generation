@@ -1545,11 +1545,8 @@ def list_models():
         print()
 
 
-def _run() -> None:
-    """CLI body. Raises ``AppError`` for expected failures and ``SystemExit``
-    for terminal cases; :func:`main` is the user-facing entry point that
-    translates ``AppError`` to a clean stderr message + exit code 1.
-    """
+def _build_argument_parser() -> argparse.ArgumentParser:
+    """Build and return the CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="Generate images using Google Gemini (Nano Banana / Nano Banana 2 / Nano Banana Pro)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1733,32 +1730,260 @@ Examples:
         help="Face enhancement strength 0.0-1.0 (used with --topaz-face-enhance)",
     )
 
-    args = parser.parse_args()
+    return parser
 
-    # Reconfigure structlog now that we know the verbosity flag.
-    _configure_logging(verbose=bool(args.verbose))
 
+def _handle_list_flags(args: argparse.Namespace) -> bool:
+    """Handle --list-models / --list-topaz-models. Return True if handled."""
     if args.list_models:
         list_models()
-        return
-
+        return True
     if args.list_topaz_models:
         list_topaz_models()
-        return
+        return True
+    return False
 
-    if not args.prompt and not args.finalize and not args.enhance:
-        parser.print_help()
+
+def _print_genai_missing() -> None:
+    """Print install guidance when the google-genai package is unavailable."""
+    print("Error: google-genai package not installed.")
+    print()
+    print("To install, create a virtual environment:")
+    print("  python3 -m venv .venv")
+    print("  source .venv/bin/activate")
+    print("  pip install google-genai")
+    print()
+    print("Or use uv:")
+    print("  uv venv && source .venv/bin/activate && uv pip install google-genai")
+
+
+def _handle_enhance(args: argparse.Namespace) -> None:
+    """Standalone Topaz enhancement mode (--enhance); exits the process."""
+    topaz_enhance_image(
+        input_path=args.enhance,
+        output_path=args.output,
+        model=args.topaz_model,
+        sharpen=args.topaz_sharpen,
+        denoise=args.topaz_denoise,
+        face_enhancement=args.topaz_face_enhance,
+        face_enhancement_strength=args.topaz_face_strength,
+        verbose=args.verbose,
+    )
+    sys.exit(0)
+
+
+def _resolve_finalize_output(args: argparse.Namespace) -> Path:
+    """Return the output path for finalize mode, defaulting next to the draft."""
+    if args.output:
+        return args.output
+    return args.finalize.parent / f"{args.finalize.stem}_final.png"
+
+
+def _finalize_via_topaz(args: argparse.Namespace, output_path: Path) -> None:
+    """Finalize a draft through Topaz (--finalize --topaz); exits the process."""
+    print(f"Finalizing draft image via Topaz: {args.finalize}")
+    print(f"Topaz model: {args.topaz_model}")
+    result = topaz_enhance_image(
+        input_path=args.finalize,
+        output_path=output_path,
+        model=args.topaz_model,
+        sharpen=args.topaz_sharpen,
+        denoise=args.topaz_denoise,
+        face_enhancement=args.topaz_face_enhance,
+        face_enhancement_strength=args.topaz_face_strength,
+        verbose=args.verbose,
+    )
+
+    print(f"\n{'=' * 60}")
+    print("Topaz finalization complete!")
+    print(f"Draft: {args.finalize}")
+    print(f"Final: {result}")
+    print(f"{'=' * 60}")
+
+    sys.exit(0)
+
+
+def _finalize_via_gemini(args: argparse.Namespace, output_path: Path) -> None:
+    """Finalize a draft by regenerating at higher resolution; exits the process."""
+    final_size = args.size or "2K"
+    final_aspect = args.aspect or "16:9"
+
+    print(f"Finalizing draft image: {args.finalize}")
+    print(f"Target resolution: {final_size} ({final_aspect})")
+
+    prompts_file = Path(__file__).parent.parent / "examples" / "PROMPTS.md"
+    if prompts_file.exists():
+        with open(prompts_file, encoding="utf-8") as f:
+            content = f.read()
+            image_name = args.finalize.stem
+            if image_name in content:
+                print("Found original prompt in PROMPTS.md")
+                if not args.prompt:
+                    print(
+                        "\nNote: Use the same prompt as the draft, or provide a refinement prompt."
+                    )
+                    print(
+                        'Example: python scripts/generate_image.py --finalize draft.png "Same as draft"'
+                    )
+                    print("\nProceeding with reference-based upscaling...")
+
+    prompt = (
+        args.prompt
+        or "Recreate this image at higher resolution with the same composition, style, and details"
+    )
+
+    result = generate_image(
+        prompt=prompt,
+        model_key=args.model,
+        reference_images=[args.finalize],
+        output_path=output_path,
+        aspect_ratio=final_aspect,
+        image_size=final_size,
+        use_search=False,
+        save_thoughts=args.save_thoughts,
+        verbose=args.verbose,
+        thinking_level=args.thinking,
+    )
+
+    if result:
+        print(f"\n{'=' * 60}")
+        print("Finalization complete!")
+        print(f"Draft (1K): {args.finalize}")
+        print(f"Final ({final_size}): {result}")
+        print(f"{'=' * 60}")
+
+    sys.exit(0 if result else 1)
+
+
+def _handle_finalize(args: argparse.Namespace) -> None:
+    """Finalize mode (--finalize): upscale a draft to final resolution."""
+    if not args.finalize.exists():
+        print(f"Error: Draft image not found: {args.finalize}")
         sys.exit(1)
 
-    # --- Standalone Topaz enhancement mode ---
-    # On failure, topaz_enhance_image raises a typed AppError that main()
-    # catches and surfaces as exit code 1; on success the function always
-    # returns a real Path, so a separate truthiness check is no longer
-    # needed.
-    if args.enhance:
-        topaz_enhance_image(
-            input_path=args.enhance,
-            output_path=args.output,
+    output_path = _resolve_finalize_output(args)
+
+    if args.topaz:
+        _finalize_via_topaz(args, output_path)
+
+    _finalize_via_gemini(args, output_path)
+
+
+def _enhance_story_results(args: argparse.Namespace, results: list) -> list:
+    """Apply Topaz to each story image, recovering per image; return new paths."""
+    print(f"\nApplying Topaz enhancement to {len(results)} image(s)...")
+    enhanced = []
+    # Catch per-image so a single failure does not abort the batch.
+    # ConfigError propagates because misconfiguration applies to
+    # every image in the batch -- recovering would just produce
+    # N identical errors.
+    for path in results:
+        try:
+            enhanced.append(
+                topaz_enhance_image(
+                    input_path=path,
+                    model=args.topaz_model,
+                    sharpen=args.topaz_sharpen,
+                    denoise=args.topaz_denoise,
+                    face_enhancement=args.topaz_face_enhance,
+                    face_enhancement_strength=args.topaz_face_strength,
+                    verbose=args.verbose,
+                )
+            )
+        except (TopazAPIError, FileIOError) as exc:  # noqa: PERF203 - per-image recovery is the point of the loop
+            log.error(f"Topaz enhancement failed for {path}: {exc}")
+    return enhanced
+
+
+def _handle_story(args: argparse.Namespace) -> None:
+    """Story sequence mode (--story-parts); exits the process."""
+    if args.story_parts < 2:
+        print("Error: Story must have at least 2 parts")
+        sys.exit(1)
+
+    output_prefix = args.output or Path("story")
+
+    results = generate_story_sequence(
+        base_prompt=args.prompt,
+        num_parts=args.story_parts,
+        model_key=args.model,
+        output_prefix=output_prefix,
+        aspect_ratio=args.aspect,
+        image_size=args.size,
+        verbose=args.verbose,
+        thinking_level=args.thinking,
+    )
+
+    if args.topaz and results:
+        results = _enhance_story_results(args, results)
+
+    sys.exit(0 if len(results) == args.story_parts else 1)
+
+
+def _resolve_effective_size(args: argparse.Namespace) -> str | None:
+    """Pick the image size, applying draft-mode defaults read from MODELS."""
+    if not (args.draft_mode and args.size is None):
+        return args.size
+
+    # Draft mode picks the smallest tier the active model supports so
+    # iteration is fast and cheap. Capability is read from MODELS rather
+    # than hardcoded so a future model entry that adds 512 (or removes
+    # 1K) Just Works. Legacy 'flash' has no size control at all - we
+    # return None so generate_image() does not receive a bogus value
+    # (which would also trigger its "does not support --aspect or --size"
+    # warning misleadingly). A user-specified --size always wins above.
+    supported_sizes = MODELS[args.model].get("image_sizes", [])
+    if "512" in supported_sizes:
+        return "512"
+    if "1K" in supported_sizes:
+        return "1K"
+    return None
+
+
+def _print_draft_banner(args: argparse.Namespace, effective_size: str | None) -> None:
+    """Print the draft-mode banner before a single-image draft generation."""
+    if effective_size:
+        print(
+            f"Draft mode: Generating at {effective_size} resolution for fast iteration"
+        )
+    else:
+        print(
+            f"Draft mode: {MODELS[args.model]['name']} has no size control;"
+            " generating at the model's default resolution"
+        )
+    print("Drafts are stored in output/drafts/")
+    print("Use --finalize <draft_image.png> to upscale to final resolution\n")
+
+
+def _handle_single(args: argparse.Namespace) -> None:
+    """Single image mode (the default); exits the process."""
+    effective_size = _resolve_effective_size(args)
+
+    if args.draft_mode:
+        _print_draft_banner(args, effective_size)
+
+    result = generate_image(
+        prompt=args.prompt,
+        model_key=args.model,
+        reference_images=args.references,
+        output_path=args.output,
+        aspect_ratio=args.aspect,
+        image_size=effective_size,
+        use_search=args.search,
+        save_thoughts=args.save_thoughts,
+        verbose=args.verbose,
+        is_draft=args.draft_mode,
+        document_prompt=True,
+        thinking_level=args.thinking,
+    )
+
+    if result and args.topaz:
+        # Single-image path: typed AppError propagates to main(); on
+        # success ``topaz_enhance_image`` returns a Path. The ``result and
+        # args.topaz`` guard already short-circuits when generate_image
+        # returned None for a non-error empty-response path.
+        result = topaz_enhance_image(
+            input_path=result,
             model=args.topaz_model,
             sharpen=args.topaz_sharpen,
             denoise=args.topaz_denoise,
@@ -1766,226 +1991,51 @@ Examples:
             face_enhancement_strength=args.topaz_face_strength,
             verbose=args.verbose,
         )
-        sys.exit(0)
+
+    if result and args.draft_mode:
+        print(f"\n{'=' * 60}")
+        print("Draft complete! To finalize at higher resolution:")
+        print(f"  python scripts/generate_image.py --finalize {result} --size 2K")
+        print(f"  # Or with Topaz: --finalize {result} --topaz")
+        print(f"{'=' * 60}")
+
+    sys.exit(0 if result else 1)
+
+
+def _run() -> None:
+    """CLI body. Raises ``AppError`` for expected failures and ``SystemExit``
+    for terminal cases; :func:`main` is the user-facing entry point that
+    translates ``AppError`` to a clean stderr message + exit code 1.
+    """
+    parser = _build_argument_parser()
+    args = parser.parse_args()
+
+    # Reconfigure structlog now that we know the verbosity flag.
+    _configure_logging(verbose=bool(args.verbose))
+
+    if _handle_list_flags(args):
+        return
+
+    if not args.prompt and not args.finalize and not args.enhance:
+        parser.print_help()
+        sys.exit(1)
+
+    # --- Standalone Topaz enhancement mode ---
+    if args.enhance:
+        _handle_enhance(args)
 
     # Check for google-genai package
     if not GENAI_AVAILABLE:
-        print("Error: google-genai package not installed.")
-        print()
-        print("To install, create a virtual environment:")
-        print("  python3 -m venv .venv")
-        print("  source .venv/bin/activate")
-        print("  pip install google-genai")
-        print()
-        print("Or use uv:")
-        print("  uv venv && source .venv/bin/activate && uv pip install google-genai")
+        _print_genai_missing()
         sys.exit(1)
 
-    # Finalize mode - upscale a draft to final resolution
     if args.finalize:
-        if not args.finalize.exists():
-            print(f"Error: Draft image not found: {args.finalize}")
-            sys.exit(1)
+        _handle_finalize(args)
 
-        # Determine output path
-        if args.output:
-            output_path = args.output
-        else:
-            output_path = args.finalize.parent / f"{args.finalize.stem}_final.png"
-
-        # --- Topaz finalization path ---
-        # Same as the standalone --enhance branch: typed AppError on
-        # failure propagates to main(); on success result is a Path.
-        if args.topaz:
-            print(f"Finalizing draft image via Topaz: {args.finalize}")
-            print(f"Topaz model: {args.topaz_model}")
-            result = topaz_enhance_image(
-                input_path=args.finalize,
-                output_path=output_path,
-                model=args.topaz_model,
-                sharpen=args.topaz_sharpen,
-                denoise=args.topaz_denoise,
-                face_enhancement=args.topaz_face_enhance,
-                face_enhancement_strength=args.topaz_face_strength,
-                verbose=args.verbose,
-            )
-
-            print(f"\n{'=' * 60}")
-            print("Topaz finalization complete!")
-            print(f"Draft: {args.finalize}")
-            print(f"Final: {result}")
-            print(f"{'=' * 60}")
-
-            sys.exit(0)
-
-        # --- Gemini finalization path ---
-        final_size = args.size or "2K"
-        final_aspect = args.aspect or "16:9"
-
-        print(f"Finalizing draft image: {args.finalize}")
-        print(f"Target resolution: {final_size} ({final_aspect})")
-
-        prompts_file = Path(__file__).parent.parent / "examples" / "PROMPTS.md"
-        if prompts_file.exists():
-            with open(prompts_file, encoding="utf-8") as f:
-                content = f.read()
-                image_name = args.finalize.stem
-                if image_name in content:
-                    print("Found original prompt in PROMPTS.md")
-                    if not args.prompt:
-                        print(
-                            "\nNote: Use the same prompt as the draft, or provide a refinement prompt."
-                        )
-                        print(
-                            'Example: python scripts/generate_image.py --finalize draft.png "Same as draft"'
-                        )
-                        print("\nProceeding with reference-based upscaling...")
-
-        prompt = (
-            args.prompt
-            or "Recreate this image at higher resolution with the same composition, style, and details"
-        )
-
-        result = generate_image(
-            prompt=prompt,
-            model_key=args.model,
-            reference_images=[args.finalize],
-            output_path=output_path,
-            aspect_ratio=final_aspect,
-            image_size=final_size,
-            use_search=False,
-            save_thoughts=args.save_thoughts,
-            verbose=args.verbose,
-            thinking_level=args.thinking,
-        )
-
-        if result:
-            print(f"\n{'=' * 60}")
-            print("Finalization complete!")
-            print(f"Draft (1K): {args.finalize}")
-            print(f"Final ({final_size}): {result}")
-            print(f"{'=' * 60}")
-
-        sys.exit(0 if result else 1)
-
-    # Story sequence mode
     if args.story_parts:
-        if args.story_parts < 2:
-            print("Error: Story must have at least 2 parts")
-            sys.exit(1)
+        _handle_story(args)
 
-        output_prefix = args.output or Path("story")
-
-        results = generate_story_sequence(
-            base_prompt=args.prompt,
-            num_parts=args.story_parts,
-            model_key=args.model,
-            output_prefix=output_prefix,
-            aspect_ratio=args.aspect,
-            image_size=args.size,
-            verbose=args.verbose,
-            thinking_level=args.thinking,
-        )
-
-        if args.topaz and results:
-            print(f"\nApplying Topaz enhancement to {len(results)} image(s)...")
-            enhanced = []
-            # Catch per-image so a single failure does not abort the batch.
-            # ConfigError propagates because misconfiguration applies to
-            # every image in the batch -- recovering would just produce
-            # N identical errors.
-            for path in results:
-                try:
-                    enhanced.append(
-                        topaz_enhance_image(
-                            input_path=path,
-                            model=args.topaz_model,
-                            sharpen=args.topaz_sharpen,
-                            denoise=args.topaz_denoise,
-                            face_enhancement=args.topaz_face_enhance,
-                            face_enhancement_strength=args.topaz_face_strength,
-                            verbose=args.verbose,
-                        )
-                    )
-                except (TopazAPIError, FileIOError) as exc:  # noqa: PERF203 - per-image recovery is the point of the loop
-                    log.error(f"Topaz enhancement failed for {path}: {exc}")
-            results = enhanced
-
-        sys.exit(0 if len(results) == args.story_parts else 1)
-
-    # Single image mode
-    else:
-        # Draft mode picks the smallest tier the active model supports so
-        # iteration is fast and cheap. Capability is read from MODELS rather
-        # than hardcoded so a future model entry that adds 512 (or removes
-        # 1K) Just Works. Legacy 'flash' has no size control at all - we
-        # set effective_size=None so generate_image() does not receive a
-        # bogus value (which would also trigger its
-        # "does not support --aspect or --size" warning misleadingly).
-        # A user-specified --size always wins as an explicit override.
-        if args.draft_mode and args.size is None:
-            supported_sizes = MODELS[args.model].get("image_sizes", [])
-            if "512" in supported_sizes:
-                effective_size = "512"
-            elif "1K" in supported_sizes:
-                effective_size = "1K"
-            else:
-                effective_size = None
-        else:
-            effective_size = args.size
-
-        if args.draft_mode:
-            if effective_size:
-                print(
-                    f"Draft mode: Generating at {effective_size} resolution for fast iteration"
-                )
-            else:
-                print(
-                    f"Draft mode: {MODELS[args.model]['name']} has no size control;"
-                    " generating at the model's default resolution"
-                )
-            print("Drafts are stored in output/drafts/")
-            print("Use --finalize <draft_image.png> to upscale to final resolution\n")
-
-        result = generate_image(
-            prompt=args.prompt,
-            model_key=args.model,
-            reference_images=args.references,
-            output_path=args.output,
-            aspect_ratio=args.aspect,
-            image_size=effective_size,
-            use_search=args.search,
-            save_thoughts=args.save_thoughts,
-            verbose=args.verbose,
-            is_draft=args.draft_mode,
-            document_prompt=True,
-            thinking_level=args.thinking,
-        )
-
-        if result and args.topaz:
-            # Single-image path: typed AppError propagates to main(); on
-            # success ``topaz_enhance_image`` returns a Path. The previous
-            # ``result and args.topaz`` guard already short-circuits when
-            # generate_image returned None for a non-error empty-response
-            # path, so we do not need an extra except here.
-            result = topaz_enhance_image(
-                input_path=result,
-                model=args.topaz_model,
-                sharpen=args.topaz_sharpen,
-                denoise=args.topaz_denoise,
-                face_enhancement=args.topaz_face_enhance,
-                face_enhancement_strength=args.topaz_face_strength,
-                verbose=args.verbose,
-            )
-
-        if result and args.draft_mode:
-            print(f"\n{'=' * 60}")
-            print("Draft complete! To finalize at higher resolution:")
-            print(f"  python scripts/generate_image.py --finalize {result} --size 2K")
-            print(f"  # Or with Topaz: --finalize {result} --topaz")
-            print(f"{'=' * 60}")
-
-        sys.exit(0 if result else 1)
+    _handle_single(args)
 
 
 def main() -> None:
