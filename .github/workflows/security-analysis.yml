@@ -22,7 +22,7 @@ jobs:
       security-events: write
       pull-requests: write
       actions: read
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-security-analysis.yml@8fbdb549a33a93520e7b431d8d9b8d5e9478674a # main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-security-analysis.yml@40ff5b5615e786ee0867e1b9e8f21a4735036e63 # main
     with:
       python-version: "3.12"
       # `run-safety` was removed from the org reusable workflow when the
@@ -42,7 +42,7 @@ jobs:
     if: always()
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5  # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2.19.4
         with:
           egress-policy: audit
       - name: Check security scan results
