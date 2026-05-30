@@ -3651,6 +3651,7 @@ class TestSettingsLoaderEdgeCases:
     def test_unreadable_env_file_falls_back_to_environment(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """An OSError reading .env logs a warning and falls back to env vars.
 
@@ -3683,4 +3684,11 @@ class TestSettingsLoaderEdgeCases:
         # .env file, with the key resolved from the process environment.
         assert settings.GEMINI_API_KEY == "from-environ"
         assert fake_settings.call_count == 2
-        assert fake_settings.call_args.kwargs == {"_env_file": None}
+        # Only the ``_env_file`` contract matters; tolerate future extra kwargs.
+        assert fake_settings.call_args.kwargs.get("_env_file") is None
+        # The fallback must be announced. ``log`` writes via structlog's
+        # _StderrLoggerFactory (not stdlib logging), so the warning lands on
+        # stderr where capsys captures it -- caplog would not see it.
+        err = capsys.readouterr().err
+        assert ".env" in err
+        assert "falling back" in err
