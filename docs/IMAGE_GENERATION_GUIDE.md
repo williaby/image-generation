@@ -49,7 +49,9 @@ The `scripts/generate_image.py` script supports:
 - **Draft-Then-Finalize Workflow**: `--draft-mode` picks the smallest tier the model supports (512 on flash-2, 1K elsewhere) for fast iteration; `--finalize` upscales to high-res
 - **Thinking Process Visibility**: `--verbose` flag shows reasoning steps
 - **Thought Image Saving**: `--save-thoughts` captures intermediate refinement images
-- **Aspect Ratio Control**: 1:1, 3:4, 4:3, 9:16, 16:9
+- **Aspect Ratio Control**: flash-2 supports 14 ratios (1:1, 1:4, 1:8, 2:3,
+  3:2, 3:4, 4:1, 4:3, 4:5, 5:4, 8:1, 9:16, 16:9, 21:9); pro supports 5
+  (1:1, 3:4, 4:3, 9:16, 16:9)
 - **Resolution Control**: 1K (draft), 2K (standard), 4K (premium)
 - **Reference Images**: Up to 14 reference images for style/composition consistency
 - **Google Search Grounding**: `--search` for factually accurate real-world content

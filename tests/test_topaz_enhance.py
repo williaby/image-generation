@@ -335,7 +335,10 @@ class TestHappyPath:
 
         assert result is not None
         assert result.exists()
-        assert "topaz" in result.name
+        # The happy-path mock downloads PNG bytes, so detect_image_format yields
+        # ".png" deterministically: assert the exact ``<input-stem>_topaz.png``
+        # name rather than a loose suffix set.
+        assert result.name == "input_topaz.png"
 
 
 # ---------------------------------------------------------------------------
