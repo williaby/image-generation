@@ -335,7 +335,11 @@ class TestHappyPath:
 
         assert result is not None
         assert result.exists()
-        assert "topaz" in result.name
+        # Auto-generated name follows ``<input-stem>_topaz<ext>`` (the extension
+        # is derived from the downloaded image's magic bytes, so assert on the
+        # stem and a valid image suffix rather than a loose substring).
+        assert result.stem == "input_topaz"
+        assert result.suffix in {".png", ".jpg", ".jpeg", ".webp"}
 
 
 # ---------------------------------------------------------------------------

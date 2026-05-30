@@ -1040,7 +1040,10 @@ class TestGenerateImageProModel:
         assert "gemini-3-pro" in str(call_kwargs).lower() or "pro" in str(call_kwargs)
 
     def test_pro_model_with_google_search(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         import scripts.generate_image as mod
 
@@ -1074,6 +1077,12 @@ class TestGenerateImageProModel:
             )
 
         assert result is not None
+        # use_search=True must actually wire the grounding tool into the
+        # GenerateContentConfig, not merely return a file. Verify both the
+        # user-visible signal and that the config carries a non-empty tools list.
+        assert "Google Search grounding: enabled" in capsys.readouterr().out
+        call_kwargs = mock_client_instance.models.generate_content.call_args.kwargs
+        assert call_kwargs["config"].tools
 
     def test_invalid_aspect_ratio_warns_and_continues(
         self,
@@ -3638,3 +3647,40 @@ class TestSettingsLoaderEdgeCases:
             mod.get_settings()
 
         assert "UTF-8" in str(exc_info.value) or "decode" in str(exc_info.value).lower()
+
+    def test_unreadable_env_file_falls_back_to_environment(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An OSError reading .env logs a warning and falls back to env vars.
+
+        Unlike a malformed (non-UTF-8) file, which raises ConfigError, an
+        unreadable file must not raise: users who set keys via the process
+        environment but happen to have an unreadable stub .env should still
+        succeed. This exercises the ``except OSError`` fallback branch in
+        ``get_settings`` that the malformed-file test does not reach.
+        """
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "from-environ")
+        monkeypatch.delenv("TOPAZ_API_KEY", raising=False)
+
+        real_settings_cls = mod.Settings
+
+        def settings_factory(*args: object, **kwargs: object) -> object:
+            # First call (loading the real .env) simulates an unreadable file;
+            # the fallback call passes ``_env_file=None`` and must succeed.
+            if "_env_file" not in kwargs:
+                raise OSError("simulated unreadable .env")
+            return real_settings_cls(*args, **kwargs)
+
+        fake_settings = MagicMock(side_effect=settings_factory)
+        monkeypatch.setattr(mod, "Settings", fake_settings)
+
+        settings = mod.get_settings()
+
+        # Fallback path executed: two constructions, the second disabling the
+        # .env file, with the key resolved from the process environment.
+        assert settings.GEMINI_API_KEY == "from-environ"
+        assert fake_settings.call_count == 2
+        assert fake_settings.call_args.kwargs == {"_env_file": None}
