@@ -29,7 +29,6 @@ Key suppressions on `generate_image.py` and their rationale:
 | `PLR` | Complexity refactor deferred; tracked separately |
 | `C901` | Same complexity backlog as `PLR` |
 | `D` | Docstring style cleanup tracked separately |
-| `N806` | Variable naming cleanup tracked separately |
 | `G004` | structlog renders f-strings eagerly; the form is idiomatic here |
 
 ## Print vs. structlog: when to use each
