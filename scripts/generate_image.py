@@ -494,42 +494,8 @@ def get_topaz_api_key() -> str | None:
     return api_key
 
 
-def topaz_enhance_image(
-    input_path: Path,
-    output_path: Path | None = None,
-    model: str = DEFAULT_TOPAZ_MODEL,
-    output_format: str = "png",
-    sharpen: float | None = None,
-    denoise: float | None = None,
-    face_enhancement: bool = False,
-    face_enhancement_strength: float | None = None,
-    verbose: bool = False,
-) -> Path:
-    """Enhance an image using the Topaz Labs API (async job with polling).
-
-    Precision models (Gigapixel family): 24 MP per credit.
-    Generative models (Wonder, Bloom): 2-4 MP per credit, significantly more expensive.
-
-    Raises:
-        ConfigError: invalid input arguments (unknown model, bad output
-            format, strength out of range, face-strength without face flag).
-        FileIOError: input file missing / not a regular file / over size cap,
-            or output write failure.
-        TopazAPIError: Topaz API transport, HTTP, JSON, or status failure;
-            also covers SSRF allowlist rejection and missing httpx runtime.
-    """
-    if not HTTPX_AVAILABLE:
-        raise TopazAPIError(
-            "'httpx' package is required for Topaz enhancement. "
-            "Install with: pip install httpx"
-        )
-
-    api_key = get_topaz_api_key()
-    if not api_key:
-        raise ConfigError(
-            "TOPAZ_API_KEY is not set. Set it via the environment or .env file."
-        )
-
+def _validate_topaz_input_file(input_path: Path) -> None:
+    """Validate the Topaz input file exists, is regular, and is within size limits."""
     # stat() also covers the "missing file" case via FileNotFoundError,
     # which is a subclass of OSError. The explicit exists() check was
     # redundant and made the FileNotFoundError branch unreachable.
@@ -551,6 +517,16 @@ def topaz_enhance_image(
             f"exceeds limit of {MAX_INPUT_IMAGE_BYTES} bytes."
         )
 
+
+def _validate_topaz_params(
+    model: str,
+    output_format: str,
+    sharpen: float | None,
+    denoise: float | None,
+    face_enhancement: bool,
+    face_enhancement_strength: float | None,
+) -> dict:
+    """Validate Topaz model/format/strength arguments; return the model config."""
     model_config = TOPAZ_MODELS.get(model)
     if model_config is None:
         raise ConfigError(
@@ -575,19 +551,18 @@ def topaz_enhance_image(
         raise ConfigError(
             "--topaz-face-strength requires --topaz-face-enhance to be set."
         )
+    return model_config
 
-    # #CRITICAL: API key sent as X-API-KEY header; never log headers containing this value.
-    # #VERIFY   -- Audit log handler config before enabling debug logging.
-    # #ASSUME: Topaz API at TOPAZ_BASE_URL accepts multipart/form-data for all model endpoints.
-    # #VERIFY   -- Check developer.topazlabs.com changelog before upgrading httpx.
-    # SSRF guard for the download step uses the module-level
-    # `TOPAZ_DOWNLOAD_HOSTS` allowlist.
-    headers = {"X-API-KEY": api_key}
-    endpoint_url = f"{TOPAZ_BASE_URL}/{model_config['endpoint']}"
 
-    if verbose:
-        print(f"Topaz enhance: {input_path.name} [{model}]")
-
+def _build_topaz_form_data(
+    model: str,
+    output_format: str,
+    sharpen: float | None,
+    denoise: float | None,
+    face_enhancement: bool,
+    face_enhancement_strength: float | None,
+) -> dict:
+    """Build the multipart form fields for a Topaz enhancement request."""
     data: dict = {"model": model, "output_format": output_format}
     if sharpen is not None:
         data["sharpen"] = sharpen
@@ -597,7 +572,17 @@ def topaz_enhance_image(
         data["face_enhancement"] = "true"
         if face_enhancement_strength is not None:
             data["face_enhancement_strength"] = face_enhancement_strength
+    return data
 
+
+def _topaz_submit_job(
+    endpoint_url: str,
+    headers: dict,
+    data: dict,
+    input_path: Path,
+    verbose: bool,
+) -> str:
+    """Submit the async Topaz job and return its process_id."""
     # Submit async job. Split into two try blocks:
     #   1. Network + file-read errors (httpx.HTTPError covers timeouts, HTTP
     #      status errors, transport failures; OSError covers input file read
@@ -652,7 +637,11 @@ def topaz_enhance_image(
         )
     if verbose:
         print(f"  Job submitted: {process_id}")
+    return process_id
 
+
+def _topaz_poll_job(process_id: str, headers: dict, verbose: bool) -> None:
+    """Poll the Topaz job until it completes, fails, or the limit is reached."""
     # #ASSUME: job completes within 25 poll iterations. Happy-path wall time is
     # ~5 minutes (1.5x backoff capped at 15 s per iteration). Under sustained
     # HTTP 429 backoff the 2x backoff caps at 30 s per iteration, so the
@@ -700,6 +689,9 @@ def topaz_enhance_image(
             f"Topaz job {process_id} did not complete within the polling limit."
         )
 
+
+def _topaz_get_download_url(process_id: str, headers: dict) -> str:
+    """Fetch and validate (HTTPS + host allowlist) the Topaz result download URL."""
     # Get download URL -- same split-try pattern as the submit block above:
     # network errors first, then JSON parse errors with dl_resp provably bound.
     try:
@@ -739,7 +731,11 @@ def topaz_enhance_image(
     _parsed = urlparse(download_url)
     if _parsed.scheme != "https" or _parsed.hostname not in TOPAZ_DOWNLOAD_HOSTS:
         raise TopazAPIError(f"Topaz returned unexpected download URL: {download_url!r}")
+    return download_url
 
+
+def _topaz_download_image(download_url: str, process_id: str) -> bytes:
+    """Download the enhanced image bytes from the validated Topaz URL."""
     # Download the enhanced image
     try:
         img_resp = httpx.get(download_url, timeout=120, follow_redirects=False)
@@ -754,7 +750,13 @@ def topaz_enhance_image(
         raise TopazAPIError(
             f"Topaz download returned empty response for job {process_id}"
         )
+    return image_data
 
+
+def _finalize_topaz_output(
+    output_path: Path | None, input_path: Path, image_data: bytes
+) -> Path:
+    """Resolve the output path (correcting extension) and write the image."""
     # Resolve output path
     if output_path is None:
         detected_ext = detect_image_format(image_data)
@@ -780,7 +782,78 @@ def topaz_enhance_image(
         raise FileIOError(
             f"Error writing Topaz output file {output_path}: {exc}"
         ) from exc
+    return output_path
 
+
+def topaz_enhance_image(
+    input_path: Path,
+    output_path: Path | None = None,
+    model: str = DEFAULT_TOPAZ_MODEL,
+    output_format: str = "png",
+    sharpen: float | None = None,
+    denoise: float | None = None,
+    face_enhancement: bool = False,
+    face_enhancement_strength: float | None = None,
+    verbose: bool = False,
+) -> Path:
+    """Enhance an image using the Topaz Labs API (async job with polling).
+
+    Precision models (Gigapixel family): 24 MP per credit.
+    Generative models (Wonder, Bloom): 2-4 MP per credit, significantly more expensive.
+
+    Raises:
+        ConfigError: invalid input arguments (unknown model, bad output
+            format, strength out of range, face-strength without face flag).
+        FileIOError: input file missing / not a regular file / over size cap,
+            or output write failure.
+        TopazAPIError: Topaz API transport, HTTP, JSON, or status failure;
+            also covers SSRF allowlist rejection and missing httpx runtime.
+    """
+    if not HTTPX_AVAILABLE:
+        raise TopazAPIError(
+            "'httpx' package is required for Topaz enhancement. "
+            "Install with: pip install httpx"
+        )
+
+    api_key = get_topaz_api_key()
+    if not api_key:
+        raise ConfigError(
+            "TOPAZ_API_KEY is not set. Set it via the environment or .env file."
+        )
+    _validate_topaz_input_file(input_path)
+    model_config = _validate_topaz_params(
+        model,
+        output_format,
+        sharpen,
+        denoise,
+        face_enhancement,
+        face_enhancement_strength,
+    )
+    # #CRITICAL: API key sent as X-API-KEY header; never log headers containing this value.
+    # #VERIFY   -- Audit log handler config before enabling debug logging.
+    # #ASSUME: Topaz API at TOPAZ_BASE_URL accepts multipart/form-data for all model endpoints.
+    # #VERIFY   -- Check developer.topazlabs.com changelog before upgrading httpx.
+    # SSRF guard for the download step uses the module-level
+    # `TOPAZ_DOWNLOAD_HOSTS` allowlist.
+    headers = {"X-API-KEY": api_key}
+    endpoint_url = f"{TOPAZ_BASE_URL}/{model_config['endpoint']}"
+
+    if verbose:
+        print(f"Topaz enhance: {input_path.name} [{model}]")
+
+    data = _build_topaz_form_data(
+        model,
+        output_format,
+        sharpen,
+        denoise,
+        face_enhancement,
+        face_enhancement_strength,
+    )
+    process_id = _topaz_submit_job(endpoint_url, headers, data, input_path, verbose)
+    _topaz_poll_job(process_id, headers, verbose)
+    download_url = _topaz_get_download_url(process_id, headers)
+    image_data = _topaz_download_image(download_url, process_id)
+    output_path = _finalize_topaz_output(output_path, input_path, image_data)
     print(f"Topaz result saved to: {output_path}")
     return output_path
 
