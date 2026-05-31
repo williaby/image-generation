@@ -966,7 +966,13 @@ def load_image_bytes(image_path: Path) -> tuple[bytes, str]:
     ``OSError``. ``FileNotFoundError`` from ``stat`` propagates unchanged for the
     missing-file contract exercised by the test suite.
     """
-    resolved_stat = image_path.resolve().stat()
+    # #EDGE: a path swap or file growth between stat() and read() could bypass
+    # the size / regular-file checks. Resolve once and stat+open the *same*
+    # resolved path, bound the read to MAX_INPUT_IMAGE_BYTES + 1, then re-check
+    # the length -- closing the TOCTOU window and keeping peak memory bounded.
+    # #VERIFY: tests/test_security_hardening.py exercises the size-cap path.
+    resolved_path = image_path.resolve()
+    resolved_stat = resolved_path.stat()
     if not stat.S_ISREG(resolved_stat.st_mode):
         raise FileIOError(f"Reference image {image_path} is not a regular file.")
     size = resolved_stat.st_size
@@ -976,10 +982,15 @@ def load_image_bytes(image_path: Path) -> tuple[bytes, str]:
             f"exceeds limit of {MAX_INPUT_IMAGE_BYTES} bytes."
         )
     try:
-        with open(image_path, "rb") as f:
-            raw_data = f.read()
+        with open(resolved_path, "rb") as f:
+            raw_data = f.read(MAX_INPUT_IMAGE_BYTES + 1)
     except OSError as exc:
         raise FileIOError(f"Error reading reference image {image_path}: {exc}") from exc
+    if len(raw_data) > MAX_INPUT_IMAGE_BYTES:
+        raise FileIOError(
+            f"Reference image {image_path} exceeds limit of "
+            f"{MAX_INPUT_IMAGE_BYTES} bytes (grew after validation)."
+        )
 
     # Detect actual format from magic bytes
     detected_ext = detect_image_format(raw_data)

@@ -2487,7 +2487,10 @@ class TestGenerateImageNonBytesSignature:
         assert sig_file.read_bytes() == b"string-signature-value"
 
     def test_signature_write_oserror_is_non_fatal(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """A failed signature sidecar write warns but does not fail the image save."""
         import builtins
@@ -2541,6 +2544,9 @@ class TestGenerateImageNonBytesSignature:
         assert result.exists()
         sig_file = result.with_suffix(".signature.bin")
         assert not sig_file.exists()
+        # The failure must be surfaced (warning to stderr), not silently dropped.
+        err = capsys.readouterr().err
+        assert "Could not write thought signature" in err
 
 
 # ---------------------------------------------------------------------------
