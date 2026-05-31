@@ -960,6 +960,13 @@ def load_image_as_base64(image_path: Path) -> tuple[str, str]:
     stat) and oversize / non-regular files raise ValueError; both are caught
     by the call site in generate_image().
     """
+    raw_data, mime_type = load_image_bytes(image_path)
+    data = base64.standard_b64encode(raw_data).decode("utf-8")
+    return data, mime_type
+
+
+def load_image_bytes(image_path: Path) -> tuple[bytes, str]:
+    """Load an image file and return raw bytes plus detected MIME type."""
     resolved_stat = image_path.resolve().stat()
     if not stat.S_ISREG(resolved_stat.st_mode):
         raise ValueError(f"Reference image {image_path} is not a regular file.")
@@ -990,14 +997,7 @@ def load_image_as_base64(image_path: Path) -> tuple[str, str]:
         )
         print(f"  Using detected MIME type: {mime_type}")
 
-    data = base64.standard_b64encode(raw_data).decode("utf-8")
-    return data, mime_type
-
-
-def load_image_bytes(image_path: Path) -> tuple[bytes, str]:
-    """Load an image file and return raw bytes plus detected MIME type."""
-    data_b64, mime_type = load_image_as_base64(image_path)
-    return base64.standard_b64decode(data_b64), mime_type
+    return raw_data, mime_type
 
 
 def _build_detailed_entry(
