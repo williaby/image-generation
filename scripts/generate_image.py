@@ -692,7 +692,7 @@ def _topaz_poll_job(process_id: str, headers: dict, verbose: bool) -> None:
 
 def _topaz_get_download_url(process_id: str, headers: dict) -> str:
     """Fetch and validate (HTTPS + host allowlist) the Topaz result download URL."""
-    # Get download URL -- same split-try pattern as the submit block above:
+    # Get download URL -- same split-try pattern used in _topaz_submit_job:
     # network errors first, then JSON parse errors with dl_resp provably bound.
     try:
         dl_resp = httpx.get(
