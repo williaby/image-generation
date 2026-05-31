@@ -1330,7 +1330,14 @@ def _collect_response_parts(
 
 
 def _reanchor_output_path(output_path: Path, is_draft: bool, script_dir: Path) -> Path:
-    """Re-anchor a user output path that resolves outside the repo output/ tree."""
+    """Re-anchor a user output path that resolves outside the repo output/ tree.
+
+    Security boundary: a user-supplied path like ``output/../../../etc/cron.d/x``
+    is textually rooted at ``output`` but resolves outside the tree. Resolving
+    both sides and comparing with ``is_relative_to`` (rather than a string
+    ``startswith`` check) is what closes that path-traversal gap; any path that
+    escapes ``script_dir/output`` is re-anchored back inside it by basename.
+    """
     allowed_root = (script_dir / "output").resolve()
     try:
         resolved_out = output_path.resolve()
@@ -1350,7 +1357,12 @@ def _reanchor_output_path(output_path: Path, is_draft: bool, script_dir: Path) -
 def _resolve_generated_output_path(
     output_path: Path | None, detected_ext: str, is_draft: bool, script_dir: Path
 ) -> Path:
-    """Determine the final output path, organizing drafts/finals and fixing the extension."""
+    """Determine the final output path, organizing drafts/finals and fixing the extension.
+
+    For a user-supplied path this also enforces the path-traversal boundary via
+    :func:`_reanchor_output_path`; the ``output_path is None`` branch builds a
+    safe path under ``output/`` directly and needs no re-anchoring.
+    """
     if output_path is None:
         timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
         # Random suffix makes default filenames non-guessable when the
@@ -1952,11 +1964,15 @@ def _print_genai_missing() -> None:
     print("  uv venv && source .venv/bin/activate && uv pip install google-genai")
 
 
-def _handle_enhance(args: argparse.Namespace) -> None:
-    """Standalone Topaz enhancement mode (--enhance); exits the process."""
-    topaz_enhance_image(
-        input_path=args.enhance,
-        output_path=args.output,
+def _topaz_from_args(
+    args: argparse.Namespace,
+    input_path: Path,
+    output_path: Path | None = None,
+) -> Path:
+    """Call topaz_enhance_image with the shared --topaz-* options read from args."""
+    return topaz_enhance_image(
+        input_path=input_path,
+        output_path=output_path,
         model=args.topaz_model,
         sharpen=args.topaz_sharpen,
         denoise=args.topaz_denoise,
@@ -1964,6 +1980,11 @@ def _handle_enhance(args: argparse.Namespace) -> None:
         face_enhancement_strength=args.topaz_face_strength,
         verbose=args.verbose,
     )
+
+
+def _handle_enhance(args: argparse.Namespace) -> None:
+    """Standalone Topaz enhancement mode (--enhance); exits the process."""
+    _topaz_from_args(args, args.enhance, args.output)
     sys.exit(0)
 
 
@@ -1978,16 +1999,7 @@ def _finalize_via_topaz(args: argparse.Namespace, output_path: Path) -> None:
     """Finalize a draft through Topaz (--finalize --topaz); exits the process."""
     print(f"Finalizing draft image via Topaz: {args.finalize}")
     print(f"Topaz model: {args.topaz_model}")
-    result = topaz_enhance_image(
-        input_path=args.finalize,
-        output_path=output_path,
-        model=args.topaz_model,
-        sharpen=args.topaz_sharpen,
-        denoise=args.topaz_denoise,
-        face_enhancement=args.topaz_face_enhance,
-        face_enhancement_strength=args.topaz_face_strength,
-        verbose=args.verbose,
-    )
+    result = _topaz_from_args(args, args.finalize, output_path)
 
     print(f"\n{'=' * 60}")
     print("Topaz finalization complete!")
@@ -2074,17 +2086,7 @@ def _enhance_story_results(args: argparse.Namespace, results: list) -> list:
     # N identical errors.
     for path in results:
         try:
-            enhanced.append(
-                topaz_enhance_image(
-                    input_path=path,
-                    model=args.topaz_model,
-                    sharpen=args.topaz_sharpen,
-                    denoise=args.topaz_denoise,
-                    face_enhancement=args.topaz_face_enhance,
-                    face_enhancement_strength=args.topaz_face_strength,
-                    verbose=args.verbose,
-                )
-            )
+            enhanced.append(_topaz_from_args(args, path))
         except (TopazAPIError, FileIOError) as exc:  # noqa: PERF203 - per-image recovery is the point of the loop
             log.error(f"Topaz enhancement failed for {path}: {exc}")
     return enhanced
@@ -2177,15 +2179,7 @@ def _handle_single(args: argparse.Namespace) -> None:
         # success ``topaz_enhance_image`` returns a Path. The ``result and
         # args.topaz`` guard already short-circuits when generate_image
         # returned None for a non-error empty-response path.
-        result = topaz_enhance_image(
-            input_path=result,
-            model=args.topaz_model,
-            sharpen=args.topaz_sharpen,
-            denoise=args.topaz_denoise,
-            face_enhancement=args.topaz_face_enhance,
-            face_enhancement_strength=args.topaz_face_strength,
-            verbose=args.verbose,
-        )
+        result = _topaz_from_args(args, result)
 
     if result and args.draft_mode:
         print(f"\n{'=' * 60}")
