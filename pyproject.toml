@@ -7,7 +7,7 @@ license = {text = "MIT"}
 authors = [{name = "Byron Williams", email = "byronawilliams@gmail.com"}]
 requires-python = ">=3.10,<3.15"
 dependencies = [
-    "google-genai>=2.2.0,<2.3.0",
+    "google-genai>=2.7.0,<3.0.0",
     "httpx>=0.27.0,<1.0.0",
     "pydantic-settings>=2.0.0,<3.0.0",
     # Upper bound on next major; structlog processors and renderers form a
@@ -20,10 +20,11 @@ dependencies = [
     # pulled transitively by other dependencies; the explicit pin ensures the
     # resolver picks a patched version regardless.
     "urllib3>=2.7.0,<3.0.0",
-    # Pinned to address CVE-2026-45409. idna is pulled transitively (via httpx
-    # and the google-genai stack); the explicit floor ensures the resolver
-    # picks the patched 3.15 regardless of what a transitive dependency requests.
-    "idna>=3.15",
+    # Pinned to address CVE-2026-45409 (denial of service via crafted input to
+    # idna.encode). Fixed in 3.15. idna is pulled transitively (httpx, requests
+    # via google-genai); the explicit floor ensures the resolver picks a patched
+    # version. Confirmed by uv run pip-audit.
+    "idna>=3.15,<4.0.0",
 ]
 
 [project.urls]
@@ -37,10 +38,18 @@ dev = [
     "basedpyright>=1.0.0",
     "ruff>=0.4.0",
     "pre-commit>=3.0.0",
-    "bandit>=1.7.5",
+    # bandit[toml] so `bandit -c pyproject.toml` can parse the [tool.bandit]
+    # config on all supported Python versions (stdlib tomllib only exists on
+    # 3.11+; the toml extra supplies tomli below that). Matches the pre-commit
+    # bandit hook, which also installs bandit[toml].
+    "bandit[toml]>=1.7.5",
     "pip-audit>=2.7.0",
     "hypothesis>=6.0.0,<7.0.0",
 ]
+# interrogate and detect-secrets are intentionally NOT project dependencies:
+# interrogate pulls `py` (PYSEC-2022-42969, unmaintained, no fix), which would
+# fail the pip-audit gate. CI runs both as isolated tools via uvx (see ci.yml),
+# matching how pre-commit runs them in their own environments.
 
 [tool.ruff]
 line-length = 88
@@ -160,8 +169,6 @@ ignore = [
     "PTH123",                  # pathlib migration deferred to cleanup pass
     "C901",                    # residual complexity in dispatch/parse paths
     "D",                       # docstring style cleanup tracked separately
-    "N806",                    # variable naming cleanup tracked separately
-    "PLW2901",                 # loop variable overwrite tracked separately
     "ARG001",                  # unused arg tracked separately
     "ARG002",                  # unused method args (structlog logger shim methods)
     "G004",                    # f-string in log call; structlog renderer handles

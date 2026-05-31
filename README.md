@@ -145,7 +145,7 @@ image-generation/
 │   └── finals/                         # Final images (2K/4K)
 ├── examples/                           # Example prompts and outputs
 │   └── PROMPTS.md                      # Registry of generation prompts
-├── requirements.txt                    # Python dependencies
+├── pyproject.toml                      # Project metadata and dependencies
 └── .gitignore
 ```
 

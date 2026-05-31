@@ -1040,7 +1040,10 @@ class TestGenerateImageProModel:
         assert "gemini-3-pro" in str(call_kwargs).lower() or "pro" in str(call_kwargs)
 
     def test_pro_model_with_google_search(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         import scripts.generate_image as mod
 
@@ -1074,6 +1077,26 @@ class TestGenerateImageProModel:
             )
 
         assert result is not None
+        # use_search=True must actually wire the grounding tool into the
+        # GenerateContentConfig, not merely return a file. Verify both the
+        # user-visible signal and that the config carries a non-empty tools list.
+        assert "Google Search grounding: enabled" in capsys.readouterr().out
+        call_kwargs = mock_client_instance.models.generate_content.call_args.kwargs
+        tools = call_kwargs["config"].tools
+        # use_search must wire exactly one grounding tool, and it must be the
+        # Google Search tool specifically: a bare truthiness check would also
+        # pass if the wrong tool were attached. google-genai coerces the
+        # ``{"google_search": {}}`` dict into a ``types.Tool`` when building the
+        # GenerateContentConfig, so tolerate either the coerced object or the
+        # raw dict form.
+        assert len(tools) == 1
+        only_tool = tools[0]
+        google_search = (
+            only_tool.google_search
+            if hasattr(only_tool, "google_search")
+            else only_tool["google_search"]
+        )
+        assert google_search is not None
 
     def test_invalid_aspect_ratio_warns_and_continues(
         self,
@@ -3638,3 +3661,79 @@ class TestSettingsLoaderEdgeCases:
             mod.get_settings()
 
         assert "UTF-8" in str(exc_info.value) or "decode" in str(exc_info.value).lower()
+
+    def test_unreadable_env_file_falls_back_to_environment(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An OSError reading .env logs a warning and falls back to env vars.
+
+        Unlike a malformed (non-UTF-8) file, which raises ConfigError, an
+        unreadable file must not raise: users who set keys via the process
+        environment but happen to have an unreadable stub .env should still
+        succeed. This exercises the ``except OSError`` fallback branch in
+        ``get_settings`` that the malformed-file test does not reach.
+        """
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "from-environ")
+        monkeypatch.delenv("TOPAZ_API_KEY", raising=False)
+
+        real_settings_cls = mod.Settings
+
+        def settings_factory(*args: object, **kwargs: object) -> object:
+            # First call (loading the real .env) simulates an unreadable file;
+            # the fallback call passes ``_env_file=None`` and must succeed.
+            if "_env_file" not in kwargs:
+                raise OSError("simulated unreadable .env")
+            return real_settings_cls(*args, **kwargs)
+
+        fake_settings = MagicMock(side_effect=settings_factory)
+        monkeypatch.setattr(mod, "Settings", fake_settings)
+
+        settings = mod.get_settings()
+
+        # Fallback path executed: two constructions, the second disabling the
+        # .env file, with the key resolved from the process environment.
+        assert settings.GEMINI_API_KEY == "from-environ"
+        # TOPAZ_API_KEY was removed from the environment, so the fallback
+        # Settings(_env_file=None) construction must resolve it to its default
+        # (None). This confirms the fallback loaded from the process env only,
+        # not from any .env values.
+        assert settings.TOPAZ_API_KEY is None
+        assert fake_settings.call_count == 2
+        # Only the ``_env_file`` contract matters; tolerate future extra kwargs.
+        assert fake_settings.call_args.kwargs.get("_env_file") is None
+        # The fallback must be announced. ``log`` writes via structlog's
+        # _StderrLoggerFactory (not stdlib logging), so the warning lands on
+        # stderr where capsys captures it -- caplog would not see it.
+        err = capsys.readouterr().err
+        assert ".env" in err
+        assert "falling back" in err
+
+    def test_invalid_settings_raises_config_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pydantic ``ValidationError`` from ``Settings`` maps to ``ConfigError``.
+
+        ``get_settings`` wraps pydantic's raw validation failure in the CLI's
+        typed ``ConfigError`` (with remediation guidance) so the user never sees
+        a raw pydantic blob. Neither the OSError-fallback nor the
+        UnicodeDecodeError test reaches this ``except ValidationError`` branch.
+        """
+        from pydantic import ValidationError
+
+        import scripts.generate_image as mod
+
+        validation_error = ValidationError.from_exception_data(
+            "Settings",
+            [{"type": "missing", "loc": ("GEMINI_API_KEY",), "input": {}}],
+        )
+        monkeypatch.setattr(mod, "Settings", MagicMock(side_effect=validation_error))
+
+        with pytest.raises(mod.ConfigError) as exc_info:
+            mod.get_settings()
+
+        assert "Invalid configuration" in str(exc_info.value)
