@@ -79,6 +79,9 @@ import structlog
 from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from scripts import _config as _config_module
+from scripts import _images as _images_module
+
 # Compatibility shim for the ``datetime.UTC`` constant. Python 3.11 added
 # ``datetime.UTC`` as an alias for ``datetime.timezone.utc``; we target
 # 3.10+, so use the older spelling and expose ``UTC`` here for the rest of
@@ -452,6 +455,26 @@ class FileIOError(AppError):
     """An expected file write or read failed (e.g. output directory unwritable)."""
 
 
+# Re-export contract for consumers and tests: these names in
+# scripts.generate_image resolve to the same objects from scripts._config
+# and scripts._images.
+MAX_INPUT_IMAGE_BYTES = _config_module.MAX_INPUT_IMAGE_BYTES  # pyright: ignore[reportConstantRedefinition]
+TOPAZ_DOWNLOAD_HOSTS = _config_module.TOPAZ_DOWNLOAD_HOSTS  # pyright: ignore[reportConstantRedefinition]
+MODELS = _config_module.MODELS  # pyright: ignore[reportConstantRedefinition]
+DEFAULT_MODEL = _config_module.DEFAULT_MODEL  # pyright: ignore[reportConstantRedefinition]
+ASPECT_RATIOS = _config_module.ASPECT_RATIOS  # pyright: ignore[reportConstantRedefinition]
+IMAGE_SIZES = _config_module.IMAGE_SIZES  # pyright: ignore[reportConstantRedefinition]
+THINKING_LEVELS = _config_module.THINKING_LEVELS  # pyright: ignore[reportConstantRedefinition]
+TOPAZ_BASE_URL = _config_module.TOPAZ_BASE_URL  # pyright: ignore[reportConstantRedefinition]
+TOPAZ_MODELS = _config_module.TOPAZ_MODELS  # pyright: ignore[reportConstantRedefinition]
+DEFAULT_TOPAZ_MODEL = _config_module.DEFAULT_TOPAZ_MODEL  # pyright: ignore[reportConstantRedefinition]
+AppError = _config_module.AppError  # pyright: ignore[reportAssignmentType]
+ConfigError = _config_module.ConfigError  # noqa: F811  # pyright: ignore[reportAssignmentType]
+GeminiAPIError = _config_module.GeminiAPIError  # noqa: F811  # pyright: ignore[reportAssignmentType]
+TopazAPIError = _config_module.TopazAPIError  # noqa: F811  # pyright: ignore[reportAssignmentType]
+FileIOError = _config_module.FileIOError  # noqa: F811  # pyright: ignore[reportAssignmentType]
+
+
 def _load_api_key(env_var: str) -> str | None:
     """Load an API key from the environment or the repo-root .env file.
 
@@ -640,6 +663,14 @@ def _topaz_submit_job(
     return process_id
 
 
+_TOPAZ_POLL_ITERATIONS = 25
+_TOPAZ_POLL_INITIAL_WAIT = 2.0
+_TOPAZ_POLL_429_MULTIPLIER = 2.0
+_TOPAZ_POLL_429_MAX_WAIT = 30.0
+_TOPAZ_POLL_DEFAULT_MULTIPLIER = 1.5
+_TOPAZ_POLL_DEFAULT_MAX_WAIT = 15.0
+
+
 def _topaz_poll_job(process_id: str, headers: dict, verbose: bool) -> None:
     """Poll the Topaz job until it completes, fails, or the limit is reached."""
     # #ASSUME: job completes within 25 poll iterations. Happy-path wall time is
@@ -653,8 +684,8 @@ def _topaz_poll_job(process_id: str, headers: dict, verbose: bool) -> None:
     # "did not complete".
     # #VERIFY -- Test with mock that returns 429 indefinitely; confirm
     # timeout message emitted (no separate exception type today).
-    wait = 2.0
-    for _ in range(25):
+    wait = _TOPAZ_POLL_INITIAL_WAIT
+    for _ in range(_TOPAZ_POLL_ITERATIONS):
         time.sleep(wait)
         try:
             status_resp = httpx.get(
@@ -663,7 +694,7 @@ def _topaz_poll_job(process_id: str, headers: dict, verbose: bool) -> None:
                 timeout=15,
             )
             if status_resp.status_code == 429:
-                wait = min(wait * 2, 30)
+                wait = min(wait * _TOPAZ_POLL_429_MULTIPLIER, _TOPAZ_POLL_429_MAX_WAIT)
                 continue
             status_resp.raise_for_status()
             status_payload = status_resp.json()
@@ -683,11 +714,21 @@ def _topaz_poll_job(process_id: str, headers: dict, verbose: bool) -> None:
             break
         if status in ("Failed", "Error"):
             raise TopazAPIError(f"Topaz job {process_id} failed (status: {status})")
-        wait = min(wait * 1.5, 15)
+        wait = min(
+            wait * _TOPAZ_POLL_DEFAULT_MULTIPLIER,
+            _TOPAZ_POLL_DEFAULT_MAX_WAIT,
+        )
     else:
         raise TopazAPIError(
             f"Topaz job {process_id} did not complete within the polling limit."
         )
+
+
+def _poll_topaz_status(
+    process_id: str, headers: dict[str, str], *, verbose: bool
+) -> None:
+    """Compatibility wrapper exposing the Topaz polling helper."""
+    _topaz_poll_job(process_id, headers, verbose)
 
 
 def _topaz_get_download_url(process_id: str, headers: dict) -> str:
@@ -850,7 +891,7 @@ def topaz_enhance_image(
         face_enhancement_strength,
     )
     process_id = _topaz_submit_job(endpoint_url, headers, data, input_path, verbose)
-    _topaz_poll_job(process_id, headers, verbose)
+    _poll_topaz_status(process_id, headers, verbose=verbose)
     download_url = _topaz_get_download_url(process_id, headers)
     image_data = _topaz_download_image(download_url, process_id)
     output_path = _finalize_topaz_output(output_path, input_path, image_data)
@@ -901,6 +942,11 @@ def get_extension_for_mime(mime_type: str) -> str:
     return mime_to_ext.get(mime_type, ".png")
 
 
+# Keep these names aligned with scripts._images for the re-export contract.
+detect_image_format = _images_module.detect_image_format  # noqa: F811
+get_extension_for_mime = _images_module.get_extension_for_mime  # noqa: F811
+
+
 def load_image_as_base64(image_path: Path) -> tuple[str, str]:
     """Load an image file and return base64 data and mime type.
 
@@ -946,6 +992,12 @@ def load_image_as_base64(image_path: Path) -> tuple[str, str]:
 
     data = base64.standard_b64encode(raw_data).decode("utf-8")
     return data, mime_type
+
+
+def load_image_bytes(image_path: Path) -> tuple[bytes, str]:
+    """Load an image file and return raw bytes plus detected MIME type."""
+    data_b64, mime_type = load_image_as_base64(image_path)
+    return base64.standard_b64decode(data_b64), mime_type
 
 
 def _build_detailed_entry(

@@ -120,10 +120,11 @@ ignore = [
 #
 # scripts/generate_image.py: legacy CLI script with extensive boolean flag API,
 #   dynamic try/except imports, and complexity that predates current rule set.
-#   PTH123 (open() -> Path.open()), D* (docstring style), N806 (variable
-#   names), PLW2901 (loop var), and ARG001 are all tracked for a dedicated
-#   cleanup pass outside this compliance audit (GCA-001 follow-on). C901
-#   (complexity) was removed after the hot functions were decomposed.
+#   PTH123 (open() -> Path.open()), D* (docstring style), and ARG001 are all
+#   tracked for a dedicated cleanup pass outside this compliance audit
+#   (GCA-001 follow-on). N806 and PLW2901 were dropped once the file stopped
+#   triggering them (0 violations each). C901 (complexity) was removed after
+#   the hot functions were decomposed.
 #   T20 (print) is expected for a CLI tool producing user-facing output.
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
