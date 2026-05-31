@@ -1082,7 +1082,21 @@ class TestGenerateImageProModel:
         # user-visible signal and that the config carries a non-empty tools list.
         assert "Google Search grounding: enabled" in capsys.readouterr().out
         call_kwargs = mock_client_instance.models.generate_content.call_args.kwargs
-        assert call_kwargs["config"].tools
+        tools = call_kwargs["config"].tools
+        # use_search must wire exactly one grounding tool, and it must be the
+        # Google Search tool specifically: a bare truthiness check would also
+        # pass if the wrong tool were attached. google-genai coerces the
+        # ``{"google_search": {}}`` dict into a ``types.Tool`` when building the
+        # GenerateContentConfig, so tolerate either the coerced object or the
+        # raw dict form.
+        assert len(tools) == 1
+        only_tool = tools[0]
+        google_search = (
+            only_tool.google_search
+            if hasattr(only_tool, "google_search")
+            else only_tool["google_search"]
+        )
+        assert google_search is not None
 
     def test_invalid_aspect_ratio_warns_and_continues(
         self,
@@ -3683,6 +3697,11 @@ class TestSettingsLoaderEdgeCases:
         # Fallback path executed: two constructions, the second disabling the
         # .env file, with the key resolved from the process environment.
         assert settings.GEMINI_API_KEY == "from-environ"
+        # TOPAZ_API_KEY was removed from the environment, so the fallback
+        # Settings(_env_file=None) construction must resolve it to its default
+        # (None). This confirms the fallback loaded from the process env only,
+        # not from any .env values.
+        assert settings.TOPAZ_API_KEY is None
         assert fake_settings.call_count == 2
         # Only the ``_env_file`` contract matters; tolerate future extra kwargs.
         assert fake_settings.call_args.kwargs.get("_env_file") is None
@@ -3692,3 +3711,29 @@ class TestSettingsLoaderEdgeCases:
         err = capsys.readouterr().err
         assert ".env" in err
         assert "falling back" in err
+
+    def test_invalid_settings_raises_config_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pydantic ``ValidationError`` from ``Settings`` maps to ``ConfigError``.
+
+        ``get_settings`` wraps pydantic's raw validation failure in the CLI's
+        typed ``ConfigError`` (with remediation guidance) so the user never sees
+        a raw pydantic blob. Neither the OSError-fallback nor the
+        UnicodeDecodeError test reaches this ``except ValidationError`` branch.
+        """
+        from pydantic import ValidationError
+
+        import scripts.generate_image as mod
+
+        validation_error = ValidationError.from_exception_data(
+            "Settings",
+            [{"type": "missing", "loc": ("GEMINI_API_KEY",), "input": {}}],
+        )
+        monkeypatch.setattr(mod, "Settings", MagicMock(side_effect=validation_error))
+
+        with pytest.raises(mod.ConfigError) as exc_info:
+            mod.get_settings()
+
+        assert "Invalid configuration" in str(exc_info.value)

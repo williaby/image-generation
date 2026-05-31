@@ -313,17 +313,26 @@ class TestHappyPath:
         assert out_path.exists()
         assert out_path.read_bytes() == _PNG_MAGIC
 
+    @pytest.mark.parametrize(
+        ("download_bytes", "expected_name"),
+        [
+            (_PNG_MAGIC, "input_topaz.png"),
+            (_JPEG_MAGIC, "input_topaz.jpg"),
+        ],
+    )
     @patch("scripts.generate_image.time.sleep")
     def test_output_path_auto_generated_when_none(
         self,
         mock_sleep: MagicMock,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        download_bytes: bytes,
+        expected_name: str,
     ) -> None:
-        inp = _make_input_png(tmp_path)
+        inp = _make_input_png(tmp_path)  # always input.png on disk
         monkeypatch.setenv("TOPAZ_API_KEY", "test-key")
 
-        post_mock, get_mock = _happy_path_mocks()
+        post_mock, get_mock = _happy_path_mocks(image_bytes=download_bytes)
 
         with (
             patch("scripts.generate_image.httpx.post", post_mock),
@@ -335,10 +344,12 @@ class TestHappyPath:
 
         assert result is not None
         assert result.exists()
-        # The happy-path mock downloads PNG bytes, so detect_image_format yields
-        # ".png" deterministically: assert the exact ``<input-stem>_topaz.png``
-        # name rather than a loose suffix set.
-        assert result.name == "input_topaz.png"
+        # The auto-generated name's extension follows the *downloaded* image's
+        # detected format (PNG -> .png, JPEG -> .jpg) via detect_image_format,
+        # independent of the input file's suffix, per
+        # ``<input-stem>_topaz<detected-ext>``. The exact name (not a loose
+        # "topaz" in name check) locks both the stem and the format wiring.
+        assert result.name == expected_name
 
 
 # ---------------------------------------------------------------------------
