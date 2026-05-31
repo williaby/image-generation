@@ -154,8 +154,6 @@ ignore = [
     "T20",                     # CLI tool -- print() is user-facing output, not debug
     "PTH123",                  # pathlib migration deferred to cleanup pass
     "D",                       # docstring style cleanup tracked separately
-    "N806",                    # variable naming cleanup tracked separately
-    "PLW2901",                 # loop variable overwrite tracked separately
     "ARG001",                  # unused arg tracked separately
     "ARG002",                  # unused method args (structlog logger shim methods)
     "G004",                    # f-string in log call; structlog renderer handles
