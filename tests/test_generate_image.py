@@ -112,6 +112,38 @@ class TestGetExtensionForMime:
         assert get_extension_for_mime("") == ".png"
 
 
+class TestGetMimeForExtension:
+    """get_mime_for_extension() maps dot-extensions back to MIME strings."""
+
+    @pytest.mark.parametrize(
+        ("ext", "mime"),
+        [
+            (".png", "image/png"),
+            (".jpg", "image/jpeg"),
+            (".gif", "image/gif"),
+            (".webp", "image/webp"),
+        ],
+    )
+    def test_known_extensions(self, ext: str, mime: str) -> None:
+        from scripts.generate_image import get_mime_for_extension
+
+        assert get_mime_for_extension(ext) == mime
+
+    def test_unknown_extension_returns_png_fallback(self) -> None:
+        from scripts.generate_image import get_mime_for_extension
+
+        assert get_mime_for_extension(".bin") == "image/png"
+
+    def test_ext_and_mime_maps_are_exact_inverses(self) -> None:
+        """MIME_TO_EXT must be the strict inverse of EXT_TO_MIME (no drift)."""
+        from scripts._images import EXT_TO_MIME, MIME_TO_EXT
+
+        inverted_ext_to_mime = {mime: ext for ext, mime in EXT_TO_MIME.items()}
+        inverted_mime_to_ext = {ext: mime for mime, ext in MIME_TO_EXT.items()}
+        assert inverted_ext_to_mime == MIME_TO_EXT
+        assert inverted_mime_to_ext == EXT_TO_MIME
+
+
 # ---------------------------------------------------------------------------
 # Tier 2: Settings / _load_api_key() -- pydantic-settings + .env loading
 # ---------------------------------------------------------------------------
@@ -2453,6 +2485,62 @@ class TestGenerateImageNonBytesSignature:
         assert sig_file.exists()
         # Should have been encoded from string
         assert sig_file.read_bytes() == b"string-signature-value"
+
+    def test_signature_write_oserror_is_non_fatal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed signature sidecar write warns but does not fail the image save."""
+        import builtins
+
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        img_part = MagicMock()
+        img_part.inline_data = img_inline
+        img_part.text = None
+        img_part.thought = False
+        img_part.thought_signature = b"sigbytes"
+
+        fake_response = _make_fake_response([img_part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "sig_fail.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        real_open = builtins.open
+
+        def _open_failing_sidecar(file, *args, **kwargs):  # type: ignore[no-untyped-def]
+            # Only the signature sidecar write fails; the image write succeeds.
+            if str(file).endswith(".signature.bin"):
+                raise OSError("disk full")
+            return real_open(file, *args, **kwargs)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+            patch("builtins.open", side_effect=_open_failing_sidecar),
+        ):
+            result = mod.generate_image(
+                prompt="Sidecar failure test",
+                model_key="flash",
+                output_path=output_path,
+                verbose=True,
+                document_prompt=False,
+            )
+
+        # The image save still succeeds; only the sidecar is skipped.
+        assert result is not None
+        assert result.exists()
+        sig_file = result.with_suffix(".signature.bin")
+        assert not sig_file.exists()
 
 
 # ---------------------------------------------------------------------------

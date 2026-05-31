@@ -624,7 +624,7 @@ def _topaz_submit_job(
                 headers=headers,
                 data=data,
                 files={"image": f},
-                timeout=30,
+                timeout=_TOPAZ_SUBMIT_TIMEOUT,
             )
         resp.raise_for_status()
     except httpx.HTTPError as exc:
@@ -638,7 +638,7 @@ def _topaz_submit_job(
         raise TopazAPIError(
             f"Topaz submit returned non-JSON body "
             f"(status={resp.status_code}): {exc}; "
-            f"body[:200]={resp.text[:200]!r}"
+            f"body[:{_LOG_BODY_TRUNCATION}]={resp.text[:_LOG_BODY_TRUNCATION]!r}"
         ) from exc
 
     if not isinstance(submit_payload, dict):
@@ -648,7 +648,7 @@ def _topaz_submit_job(
         raise TopazAPIError(
             f"Topaz submit response was not a JSON object "
             f"(got {type(submit_payload).__name__}): "
-            f"body[:200]={resp.text[:200]!r}"
+            f"body[:{_LOG_BODY_TRUNCATION}]={resp.text[:_LOG_BODY_TRUNCATION]!r}"
         )
 
     process_id = submit_payload.get("process_id")
@@ -656,7 +656,7 @@ def _topaz_submit_job(
         raise TopazAPIError(
             f"Topaz API returned unexpected response "
             f"(missing process_id, keys={sorted(submit_payload)[:10]}): "
-            f"{resp.text[:200]}"
+            f"{resp.text[:_LOG_BODY_TRUNCATION]}"
         )
     if verbose:
         print(f"  Job submitted: {process_id}")
@@ -669,6 +669,18 @@ _TOPAZ_POLL_429_MULTIPLIER = 2.0
 _TOPAZ_POLL_429_MAX_WAIT = 30.0
 _TOPAZ_POLL_DEFAULT_MULTIPLIER = 1.5
 _TOPAZ_POLL_DEFAULT_MAX_WAIT = 15.0
+
+# Per-request HTTP timeouts (seconds). Submit uploads the source image so it gets
+# a longer budget than the lightweight status/download-URL calls; the final image
+# download is the largest transfer and gets the longest.
+_TOPAZ_SUBMIT_TIMEOUT = 30
+_TOPAZ_STATUS_TIMEOUT = 15
+_TOPAZ_DOWNLOAD_URL_TIMEOUT = 15
+_TOPAZ_IMAGE_DOWNLOAD_TIMEOUT = 120
+
+# Max characters of an upstream response body to echo into an error/log message.
+# Bounds log size while keeping enough of the payload to debug a bad response.
+_LOG_BODY_TRUNCATION = 200
 
 
 def _topaz_poll_job(process_id: str, headers: dict, verbose: bool) -> None:
@@ -691,7 +703,7 @@ def _topaz_poll_job(process_id: str, headers: dict, verbose: bool) -> None:
             status_resp = httpx.get(
                 f"{TOPAZ_BASE_URL}/status/{process_id}",
                 headers=headers,
-                timeout=15,
+                timeout=_TOPAZ_STATUS_TIMEOUT,
             )
             if status_resp.status_code == 429:
                 wait = min(wait * _TOPAZ_POLL_429_MULTIPLIER, _TOPAZ_POLL_429_MAX_WAIT)
@@ -739,7 +751,7 @@ def _topaz_get_download_url(process_id: str, headers: dict) -> str:
         dl_resp = httpx.get(
             f"{TOPAZ_BASE_URL}/download/{process_id}",
             headers=headers,
-            timeout=15,
+            timeout=_TOPAZ_DOWNLOAD_URL_TIMEOUT,
         )
         dl_resp.raise_for_status()
     except httpx.HTTPError as exc:
@@ -753,14 +765,14 @@ def _topaz_get_download_url(process_id: str, headers: dict) -> str:
         raise TopazAPIError(
             f"Topaz download URL response was non-JSON for job "
             f"{process_id} (status={dl_resp.status_code}): {exc}; "
-            f"body[:200]={dl_resp.text[:200]!r}"
+            f"body[:{_LOG_BODY_TRUNCATION}]={dl_resp.text[:_LOG_BODY_TRUNCATION]!r}"
         ) from exc
 
     if not isinstance(dl_payload, dict):
         raise TopazAPIError(
             f"Topaz download URL response for job {process_id} was "
             f"not a JSON object (got {type(dl_payload).__name__}): "
-            f"body[:200]={dl_resp.text[:200]!r}"
+            f"body[:{_LOG_BODY_TRUNCATION}]={dl_resp.text[:_LOG_BODY_TRUNCATION]!r}"
         )
 
     download_url = dl_payload.get("url")
@@ -779,7 +791,11 @@ def _topaz_download_image(download_url: str, process_id: str) -> bytes:
     """Download the enhanced image bytes from the validated Topaz URL."""
     # Download the enhanced image
     try:
-        img_resp = httpx.get(download_url, timeout=120, follow_redirects=False)
+        img_resp = httpx.get(
+            download_url,
+            timeout=_TOPAZ_IMAGE_DOWNLOAD_TIMEOUT,
+            follow_redirects=False,
+        )
         img_resp.raise_for_status()
         image_data = img_resp.content
     except httpx.HTTPError as exc:
@@ -913,38 +929,14 @@ def list_topaz_models() -> None:
     print()
 
 
-def detect_image_format(data: bytes) -> str:
-    """Detect actual image format from magic bytes.
-
-    Returns file extension (with dot) based on file signature.
-    """
-    # Check magic bytes (file signatures)
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return ".png"
-    if data[:2] == b"\xff\xd8":
-        return ".jpg"
-    if data[:6] in (b"GIF87a", b"GIF89a"):
-        return ".gif"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return ".webp"
-    # Default to PNG if unknown
-    return ".png"
-
-
-def get_extension_for_mime(mime_type: str) -> str:
-    """Get file extension for a MIME type."""
-    mime_to_ext = {
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "image/gif": ".gif",
-        "image/webp": ".webp",
-    }
-    return mime_to_ext.get(mime_type, ".png")
-
-
-# Keep these names aligned with scripts._images for the re-export contract.
-detect_image_format = _images_module.detect_image_format  # noqa: F811
-get_extension_for_mime = _images_module.get_extension_for_mime  # noqa: F811
+# Image-format helpers live in scripts._images (pure, side-effect free). They are
+# re-exported here so both ``scripts.generate_image.detect_image_format`` and
+# ``scripts._images.detect_image_format`` resolve to the same object and the test
+# suite's patch targets keep working.
+detect_image_format = _images_module.detect_image_format
+get_extension_for_mime = _images_module.get_extension_for_mime
+get_mime_for_extension = _images_module.get_mime_for_extension
+EXT_TO_MIME = _images_module.EXT_TO_MIME
 
 
 def load_image_as_base64(image_path: Path) -> tuple[str, str]:
@@ -957,8 +949,8 @@ def load_image_as_base64(image_path: Path) -> tuple[str, str]:
     points at an unexpectedly large file. Rejects non-regular files (FIFOs,
     character devices like /dev/zero) where st_size is meaningless and
     would bypass the size cap. Missing files raise FileNotFoundError (from
-    stat) and oversize / non-regular files raise ValueError; both are caught
-    by the call site in generate_image().
+    stat) and oversize / non-regular / unreadable files raise FileIOError;
+    both are caught by the call site in generate_image().
     """
     raw_data, mime_type = load_image_bytes(image_path)
     data = base64.standard_b64encode(raw_data).decode("utf-8")
@@ -966,32 +958,36 @@ def load_image_as_base64(image_path: Path) -> tuple[str, str]:
 
 
 def load_image_bytes(image_path: Path) -> tuple[bytes, str]:
-    """Load an image file and return raw bytes plus detected MIME type."""
+    """Load an image file and return raw bytes plus detected MIME type.
+
+    Raises :class:`FileIOError` (an :class:`AppError` subclass) when the path is
+    not a regular file, exceeds ``MAX_INPUT_IMAGE_BYTES``, or cannot be read, so
+    callers get the CLI's typed-error flow rather than a bare ``ValueError`` /
+    ``OSError``. ``FileNotFoundError`` from ``stat`` propagates unchanged for the
+    missing-file contract exercised by the test suite.
+    """
     resolved_stat = image_path.resolve().stat()
     if not stat.S_ISREG(resolved_stat.st_mode):
-        raise ValueError(f"Reference image {image_path} is not a regular file.")
+        raise FileIOError(f"Reference image {image_path} is not a regular file.")
     size = resolved_stat.st_size
     if size > MAX_INPUT_IMAGE_BYTES:
-        raise ValueError(
+        raise FileIOError(
             f"Reference image {image_path} is {size} bytes; "
             f"exceeds limit of {MAX_INPUT_IMAGE_BYTES} bytes."
         )
-    with open(image_path, "rb") as f:
-        raw_data = f.read()
+    try:
+        with open(image_path, "rb") as f:
+            raw_data = f.read()
+    except OSError as exc:
+        raise FileIOError(f"Error reading reference image {image_path}: {exc}") from exc
 
     # Detect actual format from magic bytes
     detected_ext = detect_image_format(raw_data)
-    ext_to_mime = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-    }
-    mime_type = ext_to_mime.get(detected_ext, "image/png")
+    mime_type = get_mime_for_extension(detected_ext)
 
     # Warn if extension doesn't match actual format
     suffix = image_path.suffix.lower()
-    if suffix != detected_ext and suffix in ext_to_mime:
+    if suffix != detected_ext and suffix in EXT_TO_MIME:
         print(
             f"Warning: File {image_path.name} has extension {suffix} but contains {detected_ext} data"
         )
@@ -1150,9 +1146,11 @@ This folder contains images generated by AI models. Each entry documents the mod
         print("✓ Documented in PROMPTS.md")
 
 
-def _build_reference_contents(reference_images: list[Path] | None) -> list | None:
+def _build_reference_contents(
+    reference_images: list[Path] | None,
+) -> list[Any] | None:
     """Build the content parts from reference images; None signals a load failure."""
-    contents: list = []
+    contents: list[Any] = []
     if reference_images:
         for img_path in reference_images:
             if not img_path.exists():
@@ -1162,7 +1160,13 @@ def _build_reference_contents(reference_images: list[Path] | None) -> list | Non
             print(f"Including reference image: {img_path}")
             try:
                 img_data, mime_type = load_image_as_base64(img_path)
-            except (ValueError, OSError) as exc:
+            except (FileIOError, OSError) as exc:
+                # FileIOError covers the size cap / non-regular-file / read
+                # failures raised by load_image_bytes; OSError remains as a
+                # belt-and-suspenders catch for the resolve()/stat() call that
+                # runs before load_image_bytes's own try block. A bad reference
+                # image is non-fatal here: skip the whole request by signalling
+                # None to generate_image, which stops cleanly.
                 log.error(f"Error: cannot load reference image {img_path}: {exc}")
                 return None
             contents.append(
@@ -1393,7 +1397,11 @@ def _reanchor_output_path(output_path: Path, is_draft: bool, script_dir: Path) -
     allowed_root = (script_dir / "output").resolve()
     try:
         resolved_out = output_path.resolve()
-    except OSError:
+    except OSError as exc:
+        # resolve() can fail on a path with a broken symlink loop or a name that
+        # is invalid for the filesystem. Treat as "outside the allowed root" so
+        # the path is re-anchored safely below; record why for debugging.
+        log.debug(f"Could not resolve output path {output_path}: {exc}")
         resolved_out = None
     if resolved_out is None or not resolved_out.is_relative_to(allowed_root):
         if is_draft:
@@ -1524,13 +1532,19 @@ def _save_final_image(
 
     if final_signature and verbose:
         sig_path = output_path.with_suffix(".signature.bin")
-        with open(sig_path, "wb") as f:
-            # Signature is binary data
-            if isinstance(final_signature, bytes):
-                f.write(final_signature)
-            else:
-                f.write(str(final_signature).encode())
-        print(f"Thought signature saved to: {sig_path}")
+        # The signature sidecar is a verbose-only diagnostic; a failure writing
+        # it must not turn a successful image save into a fatal GeminiAPIError.
+        # Log a non-fatal warning and continue.
+        try:
+            with open(sig_path, "wb") as f:
+                # Signature is binary data
+                if isinstance(final_signature, bytes):
+                    f.write(final_signature)
+                else:
+                    f.write(str(final_signature).encode())
+            print(f"Thought signature saved to: {sig_path}")
+        except OSError as exc:
+            log.warning(f"Could not write thought signature to {sig_path}: {exc}")
 
     if document_prompt:
         _document_generated_prompt(
