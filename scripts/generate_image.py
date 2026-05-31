@@ -79,26 +79,46 @@ import structlog
 from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# When this file is executed directly (``uv run scripts/generate_image.py``),
+# Python puts the ``scripts/`` directory on ``sys.path[0]`` rather than the repo
+# root, so the sibling-module imports below would fail with ModuleNotFoundError.
+# Prepend the repo root so ``scripts`` is importable as a package in that case.
+# When imported as ``scripts.generate_image`` (tests, ``python -m``) __package__
+# is set and this is a no-op.
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Configuration / data layer and pure image helpers live in sibling modules.
+# They are re-imported here (rather than referenced via attribute access) so
+# that existing call sites -- and the test suite, which imports and patches
+# these names through ``scripts.generate_image`` -- keep resolving unchanged.
+from scripts._config import (
+    ASPECT_RATIOS,
+    DEFAULT_MODEL,
+    DEFAULT_TOPAZ_MODEL,
+    IMAGE_SIZES,
+    MAX_INPUT_IMAGE_BYTES,
+    MODELS,
+    THINKING_LEVELS,
+    TOPAZ_BASE_URL,
+    TOPAZ_DOWNLOAD_HOSTS,
+    TOPAZ_MODELS,
+    AppError,
+    ConfigError,
+    FileIOError,
+    GeminiAPIError,
+    TopazAPIError,
+)
+from scripts._images import (
+    detect_image_format,
+    get_extension_for_mime,
+)
+
 # Compatibility shim for the ``datetime.UTC`` constant. Python 3.11 added
 # ``datetime.UTC`` as an alias for ``datetime.timezone.utc``; we target
 # 3.10+, so use the older spelling and expose ``UTC`` here for the rest of
 # the module to import.
 UTC = timezone.utc
-
-# Hard cap on reference / enhancement input image size. 4K PNGs are ~10 MiB;
-# 100 MiB is generous and protects against pathological local inputs that would
-# otherwise be fully loaded into memory. Peak memory is roughly 2.33x the input
-# size because both the raw bytes and the base64-encoded copy (~1.33x expansion)
-# are held simultaneously before the API call.
-MAX_INPUT_IMAGE_BYTES = 100 * 1024 * 1024
-
-# Topaz Labs download host allowlist. SSRF guard for the image fetch step in
-# topaz_enhance_image: Topaz returns a signed download URL; we restrict the
-# host to a known allowlist before issuing the GET. Kept at module scope so
-# the security boundary is visible at audit time, not buried mid-function.
-TOPAZ_DOWNLOAD_HOSTS: frozenset[str] = frozenset(
-    {"api.topazlabs.com", "cdn.topazlabs.com"}
-)
 
 # ``google-genai`` is a hard dependency declared in pyproject.toml, but tests
 # in CI environments sometimes install it lazily. The try/except preserves
@@ -126,11 +146,6 @@ GENAI_AVAILABLE: bool = _genai_imported
 # flag to False at runtime via monkeypatch triggers the same code path that a
 # missing import would.
 HTTPX_AVAILABLE: bool = True
-
-# Backwards-compatible alias retained so that downstream code or tests written
-# against the legacy ``REQUESTS_AVAILABLE`` flag continue to work. ``requests``
-# itself is no longer imported; ``httpx`` is the canonical HTTP client.
-REQUESTS_AVAILABLE: bool = HTTPX_AVAILABLE
 
 
 class _StderrLogger:
@@ -199,155 +214,14 @@ def _configure_logging(verbose: bool = False) -> None:
     )
 
 
-# #CRITICAL: Module-import side effect. ``structlog.configure(...)`` mutates
-# global processor state, so any test that imports this module observes the
-# configured pipeline regardless of fixture isolation. The deferred-import
-# pattern in tests/CLAUDE.md helps but does not eliminate this -- once a test
-# body imports ``scripts.generate_image``, all subsequent ``structlog.get_logger``
-# calls in the test process use this config.
-# #VERIFY: tests/test_generate_image.py exercises the _configure_logging path
-# at least once (currently via _StderrLogger capsys interaction); add a direct
-# assertion that re-calling _configure_logging is idempotent.
-# ``_run`` re-configures after parsing ``--verbose``.
-_configure_logging(verbose=False)
+# Logging is configured by the entry point (``main`` calls ``_configure_logging``
+# before any work, and ``_run`` re-configures once it has parsed ``--verbose``),
+# NOT at import time. Importing this module therefore has no global side effect
+# on structlog. ``log`` below is a lazy proxy: with
+# ``cache_logger_on_first_use=False`` it resolves the active configuration on
+# every call, so it works whether configuration happened in ``main`` (runtime)
+# or in the autouse ``configure_logging`` fixture in ``tests/conftest.py`` (tests).
 log = structlog.get_logger(__name__)
-
-
-# Model configurations
-# Each entry carries its own aspect_ratios / image_sizes because the three
-# Gemini image models accept different sets. Heterogeneous values are typed
-# as ``Any`` so the static checker does not treat ``MODELS[key]["foo"]`` as a
-# concrete union; per-call site checks (e.g. ``if not supports_image_config``)
-# operate on the values directly.
-MODELS: dict[str, dict[str, Any]] = {
-    "flash": {
-        "id": "gemini-2.5-flash-image",
-        "name": "Nano Banana (Gemini 2.5 Flash)",
-        "description": "Legacy fast image generation model (no aspect/size control)",
-        "supports_image_config": False,
-        "supports_thinking_config": False,
-        "aspect_ratios": [],
-        "image_sizes": [],
-    },
-    "flash-2": {
-        "id": "gemini-3.1-flash-image-preview",
-        "name": "Nano Banana 2 (Gemini 3.1 Flash Image)",
-        "description": "Pro-quality reasoning at Flash speed; 512/1K/2K/4K, 14 aspect ratios, configurable thinking, Search grounding",
-        "supports_image_config": True,
-        "supports_thinking_config": True,
-        "aspect_ratios": [
-            "1:1",
-            "1:4",
-            "1:8",
-            "2:3",
-            "3:2",
-            "3:4",
-            "4:1",
-            "4:3",
-            "4:5",
-            "5:4",
-            "8:1",
-            "9:16",
-            "16:9",
-            "21:9",
-        ],
-        "image_sizes": ["512", "1K", "2K", "4K"],
-    },
-    "pro": {
-        "id": "gemini-3-pro-image-preview",
-        "name": "Nano Banana Pro (Gemini 3 Pro)",
-        "description": "Highest quality, best text rendering, Google Search grounding, thinking mode",
-        "supports_image_config": True,
-        "supports_thinking_config": False,
-        "aspect_ratios": ["1:1", "3:4", "4:3", "9:16", "16:9"],
-        "image_sizes": ["1K", "2K", "4K"],
-    },
-}
-
-DEFAULT_MODEL = "flash-2"  # Google's new default; Pro-quality at Flash speed.
-
-# Union of valid values across all models (used for argparse choices). Derived
-# from MODELS so a future model edit cannot silently desync the CLI from the
-# actual capabilities. Per-model validation still happens inside
-# generate_image() against MODELS[key] for accurate error messages.
-# dict.fromkeys preserves first-seen order while deduplicating.
-ASPECT_RATIOS = list(
-    dict.fromkeys(r for m in MODELS.values() for r in m.get("aspect_ratios", []))
-)
-IMAGE_SIZES = list(
-    dict.fromkeys(s for m in MODELS.values() for s in m.get("image_sizes", []))
-)
-
-# Valid thinking levels for models that support thinking_config.
-THINKING_LEVELS = ["minimal", "high"]
-
-# Topaz Labs API base URL
-TOPAZ_BASE_URL = "https://api.topazlabs.com/image/v1"
-
-# Topaz model registry: "enhance" -> /enhance/async; "enhance-gen" -> /enhance-gen/async
-# Generative models (Wonder, Bloom) cost ~6-12x more credits than precision models.
-TOPAZ_MODELS = {
-    # Gigapixel precision upscaling (24 MP per credit)
-    "Standard V2": {
-        "endpoint": "enhance/async",
-        "description": "Precision upscaling, best for most images",
-    },
-    "High Fidelity V2": {
-        "endpoint": "enhance/async",
-        "description": "Highest quality, preserves fine detail",
-    },
-    "Low Resolution V2": {
-        "endpoint": "enhance/async",
-        "description": "Optimized for very low-resolution sources",
-    },
-    "CGI": {
-        "endpoint": "enhance/async",
-        "description": "Optimized for CGI and rendered imagery",
-    },
-    "Text Refine": {
-        "endpoint": "enhance/async",
-        "description": "Preserves and sharpens text in diagrams",
-    },
-    "Detail Faces": {
-        "endpoint": "enhance/async",
-        "description": "Enhances facial clarity",
-    },
-    "Recover Faces": {
-        "endpoint": "enhance/async",
-        "description": "Restores damaged or degraded faces",
-    },
-    "Transparency Upscale": {
-        "endpoint": "enhance/async",
-        "description": "Upscales images with alpha transparency",
-    },
-    # Generative upscaling (4 MP per credit; significantly more expensive)
-    "Wonder": {
-        "endpoint": "enhance-gen/async",
-        "description": "Generative upscaling, adds intelligent detail",
-    },
-    "Wonder 2": {
-        "endpoint": "enhance-gen/async",
-        "description": "Improved generative upscaling",
-    },
-    "Standard Max": {
-        "endpoint": "enhance-gen/async",
-        "description": "Maximum quality generative upscaling",
-    },
-    "Recover 3": {
-        "endpoint": "enhance-gen/async",
-        "description": "Advanced recovery with generation",
-    },
-    "Redefine": {
-        "endpoint": "enhance-gen/async",
-        "description": "Creative reinterpretation with upscaling",
-    },
-    "Bloom": {
-        "endpoint": "enhance-gen/async",
-        "description": "Creative upscaling for AI-generated art",
-    },
-}
-
-DEFAULT_TOPAZ_MODEL = "Standard V2"
 
 
 # Repo-root .env path used by ``Settings``. Resolved at module import; the
@@ -420,38 +294,6 @@ def get_settings() -> Settings:
         ) from exc
 
 
-# ---------------------------------------------------------------------------
-# Typed exception hierarchy
-# ---------------------------------------------------------------------------
-
-
-class AppError(Exception):
-    """Base for all expected, user-visible failures in this CLI.
-
-    ``main()`` catches ``AppError`` and produces a clean stderr message + an
-    exit code of 1, instead of a Python traceback. Any subclass implies the
-    failure is part of normal operation (missing config, upstream API error,
-    bad file I/O); programmer bugs should raise ordinary exceptions and
-    surface as tracebacks via the outermost ``except Exception`` safety net.
-    """
-
-
-class ConfigError(AppError):
-    """Configuration is missing or malformed (e.g. unset GEMINI_API_KEY)."""
-
-
-class GeminiAPIError(AppError):
-    """The Gemini API returned an error or unparseable response."""
-
-
-class TopazAPIError(AppError):
-    """The Topaz Labs API returned an error or unparseable response."""
-
-
-class FileIOError(AppError):
-    """An expected file write or read failed (e.g. output directory unwritable)."""
-
-
 def _load_api_key(env_var: str) -> str | None:
     """Load an API key from the environment or the repo-root .env file.
 
@@ -492,6 +334,166 @@ def get_topaz_api_key() -> str | None:
         log.error("Or add it to the .env file in the repository root.")
         log.error("Get a key at: https://developer.topazlabs.com")
     return api_key
+
+
+# Topaz async-job polling parameters. The status endpoint is polled with
+# exponential backoff; 429 (rate-limit) responses use a steeper factor/cap
+# than ordinary in-progress polls. Named here so the timing policy is visible
+# and adjustable without editing loop internals.
+# #ASSUME: job completes within _TOPAZ_POLL_ITERATIONS poll iterations.
+# Happy-path wall time is ~5 minutes (1.5x backoff capped at 15 s); under
+# sustained HTTP 429 the 2x backoff caps at 30 s, so worst-case is ~12 minutes
+# before the loop reports "did not complete".
+# #VERIFY -- Confirm the iteration count and caps against Topaz SLA docs before
+# changing them.
+# #EDGE: sustained 429 responses exhaust iterations and are reported as "did
+# not complete" (no separate exception type today).
+_TOPAZ_POLL_ITERATIONS = 25
+_TOPAZ_POLL_INITIAL_WAIT = 2.0
+_TOPAZ_POLL_BACKOFF = 1.5
+_TOPAZ_POLL_BACKOFF_MAX = 15.0
+_TOPAZ_POLL_429_BACKOFF = 2.0
+_TOPAZ_POLL_429_BACKOFF_MAX = 30.0
+
+_TOPAZ_OUTPUT_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _poll_topaz_status(
+    process_id: str, headers: dict[str, str], *, verbose: bool
+) -> None:
+    """Poll the Topaz status endpoint until the job completes.
+
+    Returns once the job status is ``Completed``. Raises :class:`TopazAPIError`
+    on a ``Failed``/``Error`` status, on transport/JSON errors, or when the
+    polling limit is exhausted (which also covers sustained 429 backoff).
+    """
+    wait = _TOPAZ_POLL_INITIAL_WAIT
+    for _ in range(_TOPAZ_POLL_ITERATIONS):
+        time.sleep(wait)
+        try:
+            status_resp = httpx.get(
+                f"{TOPAZ_BASE_URL}/status/{process_id}",
+                headers=headers,
+                timeout=15,
+            )
+            if status_resp.status_code == 429:
+                wait = min(wait * _TOPAZ_POLL_429_BACKOFF, _TOPAZ_POLL_429_BACKOFF_MAX)
+                continue
+            status_resp.raise_for_status()
+            status_payload = status_resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise TopazAPIError(
+                f"Error polling Topaz status for job {process_id}: {exc}"
+            ) from exc
+        if not isinstance(status_payload, dict):
+            raise TopazAPIError(
+                f"Topaz status response for job {process_id} was "
+                f"not a JSON object (got {type(status_payload).__name__})"
+            )
+        status = status_payload.get("status", "")
+        if verbose:
+            print(f"  Status: {status}")
+        if status == "Completed":
+            return
+        if status in ("Failed", "Error"):
+            raise TopazAPIError(f"Topaz job {process_id} failed (status: {status})")
+        wait = min(wait * _TOPAZ_POLL_BACKOFF, _TOPAZ_POLL_BACKOFF_MAX)
+    raise TopazAPIError(
+        f"Topaz job {process_id} did not complete within the polling limit."
+    )
+
+
+def _fetch_topaz_download_url(process_id: str, headers: dict[str, str]) -> str:
+    """Fetch and validate the signed download URL for a completed Topaz job.
+
+    Applies the SSRF allowlist (HTTPS + ``TOPAZ_DOWNLOAD_HOSTS``) before
+    returning the URL. Same split-try pattern as the submit block: network
+    errors first, then JSON parse errors with ``dl_resp`` provably bound.
+    """
+    try:
+        dl_resp = httpx.get(
+            f"{TOPAZ_BASE_URL}/download/{process_id}",
+            headers=headers,
+            timeout=15,
+        )
+        dl_resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise TopazAPIError(
+            f"Error getting Topaz download URL for job {process_id} (transport): {exc}"
+        ) from exc
+
+    try:
+        dl_payload = dl_resp.json()
+    except ValueError as exc:
+        raise TopazAPIError(
+            f"Topaz download URL response was non-JSON for job "
+            f"{process_id} (status={dl_resp.status_code}): {exc}; "
+            f"body[:200]={dl_resp.text[:200]!r}"
+        ) from exc
+
+    if not isinstance(dl_payload, dict):
+        raise TopazAPIError(
+            f"Topaz download URL response for job {process_id} was "
+            f"not a JSON object (got {type(dl_payload).__name__}): "
+            f"body[:200]={dl_resp.text[:200]!r}"
+        )
+
+    download_url = dl_payload.get("url")
+    # Require a non-empty string: a truthy non-string value (e.g. a JSON
+    # object/array) would otherwise reach urlparse() and raise TypeError,
+    # bypassing the typed TopazAPIError path.
+    if not isinstance(download_url, str) or not download_url:
+        raise TopazAPIError(
+            f"Topaz download response missing or non-string URL for job "
+            f"{process_id} (got {type(download_url).__name__})"
+        )
+
+    # #ASSUME: download_url is a valid HTTPS URL served from api.topazlabs.com
+    # or its CDN.
+    # #VERIFY -- Check Topaz CDN policy if an infrastructure change is announced.
+    _parsed = urlparse(download_url)
+    if _parsed.scheme != "https" or _parsed.hostname not in TOPAZ_DOWNLOAD_HOSTS:
+        raise TopazAPIError(f"Topaz returned unexpected download URL: {download_url!r}")
+    return download_url
+
+
+def _download_topaz_image(process_id: str, download_url: str) -> bytes:
+    """Download the enhanced image bytes from a validated Topaz download URL."""
+    try:
+        img_resp = httpx.get(download_url, timeout=120, follow_redirects=False)
+        img_resp.raise_for_status()
+        image_data = img_resp.content
+    except httpx.HTTPError as exc:
+        raise TopazAPIError(
+            f"Error downloading Topaz result for job {process_id}: {exc}"
+        ) from exc
+
+    if not image_data:
+        raise TopazAPIError(
+            f"Topaz download returned empty response for job {process_id}"
+        )
+    return image_data
+
+
+def _resolve_topaz_output_path(
+    input_path: Path, output_path: Path | None, image_data: bytes
+) -> Path:
+    """Pick the output path for a Topaz result, correcting the extension to the
+    actually-downloaded format (detected from magic bytes)."""
+    detected_ext = detect_image_format(image_data)
+    if output_path is None:
+        return input_path.parent / f"{input_path.stem}_topaz{detected_ext}"
+
+    user_ext = output_path.suffix.lower()
+    if user_ext not in _TOPAZ_OUTPUT_EXTENSIONS:
+        return output_path.with_suffix(detected_ext)
+    if user_ext != detected_ext:
+        log.warning(
+            f"Warning: specified extension {user_ext!r} does not match "
+            f"Topaz result {detected_ext!r}; correcting."
+        )
+        return output_path.with_suffix(detected_ext)
+    return output_path
 
 
 def topaz_enhance_image(
@@ -653,124 +655,14 @@ def topaz_enhance_image(
     if verbose:
         print(f"  Job submitted: {process_id}")
 
-    # #ASSUME: job completes within 25 poll iterations. Happy-path wall time is
-    # ~5 minutes (1.5x backoff capped at 15 s per iteration). Under sustained
-    # HTTP 429 backoff the 2x backoff caps at 30 s per iteration, so the
-    # worst-case wall time is ~12 minutes before the loop falls through to
-    # the "did not complete" branch.
-    # #VERIFY -- Confirm polling cap and the 30 s/15 s caps against Topaz
-    # SLA docs before changing the iteration count or the backoff factors.
-    # #EDGE: sustained 429 responses exhaust iterations and are reported as
-    # "did not complete".
-    # #VERIFY -- Test with mock that returns 429 indefinitely; confirm
-    # timeout message emitted (no separate exception type today).
-    wait = 2.0
-    for _ in range(25):
-        time.sleep(wait)
-        try:
-            status_resp = httpx.get(
-                f"{TOPAZ_BASE_URL}/status/{process_id}",
-                headers=headers,
-                timeout=15,
-            )
-            if status_resp.status_code == 429:
-                wait = min(wait * 2, 30)
-                continue
-            status_resp.raise_for_status()
-            status_payload = status_resp.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise TopazAPIError(
-                f"Error polling Topaz status for job {process_id}: {exc}"
-            ) from exc
-        if not isinstance(status_payload, dict):
-            raise TopazAPIError(
-                f"Topaz status response for job {process_id} was "
-                f"not a JSON object (got {type(status_payload).__name__})"
-            )
-        status = status_payload.get("status", "")
-        if verbose:
-            print(f"  Status: {status}")
-        if status == "Completed":
-            break
-        if status in ("Failed", "Error"):
-            raise TopazAPIError(f"Topaz job {process_id} failed (status: {status})")
-        wait = min(wait * 1.5, 15)
-    else:
-        raise TopazAPIError(
-            f"Topaz job {process_id} did not complete within the polling limit."
-        )
+    # Poll until completion, then fetch + validate the download URL and pull
+    # the enhanced bytes. Each step raises a typed TopazAPIError on failure;
+    # see the extracted helpers above for the polling/SSRF details.
+    _poll_topaz_status(process_id, headers, verbose=verbose)
+    download_url = _fetch_topaz_download_url(process_id, headers)
+    image_data = _download_topaz_image(process_id, download_url)
 
-    # Get download URL -- same split-try pattern as the submit block above:
-    # network errors first, then JSON parse errors with dl_resp provably bound.
-    try:
-        dl_resp = httpx.get(
-            f"{TOPAZ_BASE_URL}/download/{process_id}",
-            headers=headers,
-            timeout=15,
-        )
-        dl_resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise TopazAPIError(
-            f"Error getting Topaz download URL for job {process_id} (transport): {exc}"
-        ) from exc
-
-    try:
-        dl_payload = dl_resp.json()
-    except ValueError as exc:
-        raise TopazAPIError(
-            f"Topaz download URL response was non-JSON for job "
-            f"{process_id} (status={dl_resp.status_code}): {exc}; "
-            f"body[:200]={dl_resp.text[:200]!r}"
-        ) from exc
-
-    if not isinstance(dl_payload, dict):
-        raise TopazAPIError(
-            f"Topaz download URL response for job {process_id} was "
-            f"not a JSON object (got {type(dl_payload).__name__}): "
-            f"body[:200]={dl_resp.text[:200]!r}"
-        )
-
-    download_url = dl_payload.get("url")
-    if not download_url:
-        raise TopazAPIError(f"Topaz download response missing URL for job {process_id}")
-
-    # #ASSUME: download_url is a valid HTTPS URL served from api.topazlabs.com or its CDN.
-    # #VERIFY   -- Check Topaz CDN policy if infrastructure change announced.
-    _parsed = urlparse(download_url)
-    if _parsed.scheme != "https" or _parsed.hostname not in TOPAZ_DOWNLOAD_HOSTS:
-        raise TopazAPIError(f"Topaz returned unexpected download URL: {download_url!r}")
-
-    # Download the enhanced image
-    try:
-        img_resp = httpx.get(download_url, timeout=120, follow_redirects=False)
-        img_resp.raise_for_status()
-        image_data = img_resp.content
-    except httpx.HTTPError as exc:
-        raise TopazAPIError(
-            f"Error downloading Topaz result for job {process_id}: {exc}"
-        ) from exc
-
-    if not image_data:
-        raise TopazAPIError(
-            f"Topaz download returned empty response for job {process_id}"
-        )
-
-    # Resolve output path
-    if output_path is None:
-        detected_ext = detect_image_format(image_data)
-        output_path = input_path.parent / f"{input_path.stem}_topaz{detected_ext}"
-    else:
-        # Correct extension if needed
-        detected_ext = detect_image_format(image_data)
-        user_ext = output_path.suffix.lower()
-        if user_ext not in (".png", ".jpg", ".jpeg", ".webp"):
-            output_path = output_path.with_suffix(detected_ext)
-        elif user_ext != detected_ext:
-            log.warning(
-                f"Warning: specified extension {user_ext!r} does not match "
-                f"Topaz result {detected_ext!r}; correcting."
-            )
-            output_path = output_path.with_suffix(detected_ext)
+    output_path = _resolve_topaz_output_path(input_path, output_path, image_data)
 
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -799,47 +691,22 @@ def list_topaz_models() -> None:
     print()
 
 
-def detect_image_format(data: bytes) -> str:
-    """Detect actual image format from magic bytes.
+def load_image_bytes(image_path: Path) -> tuple[bytes, str]:
+    """Load an image file and return its raw bytes and detected MIME type.
 
-    Returns file extension (with dot) based on file signature.
-    """
-    # Check magic bytes (file signatures)
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return ".png"
-    if data[:2] == b"\xff\xd8":
-        return ".jpg"
-    if data[:6] in (b"GIF87a", b"GIF89a"):
-        return ".gif"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return ".webp"
-    # Default to PNG if unknown
-    return ".png"
-
-
-def get_extension_for_mime(mime_type: str) -> str:
-    """Get file extension for a MIME type."""
-    mime_to_ext = {
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "image/gif": ".gif",
-        "image/webp": ".webp",
-    }
-    return mime_to_ext.get(mime_type, ".png")
-
-
-def load_image_as_base64(image_path: Path) -> tuple[str, str]:
-    """Load an image file and return base64 data and mime type.
-
-    Detects actual image format from file contents (magic bytes),
-    not from file extension, to avoid MIME type mismatches.
+    Detects the actual image format from file contents (magic bytes), not the
+    file extension, to avoid MIME type mismatches.
 
     Enforces MAX_INPUT_IMAGE_BYTES to bound peak memory use when a caller
     points at an unexpectedly large file. Rejects non-regular files (FIFOs,
-    character devices like /dev/zero) where st_size is meaningless and
-    would bypass the size cap. Missing files raise FileNotFoundError (from
-    stat) and oversize / non-regular files raise ValueError; both are caught
-    by the call site in generate_image().
+    character devices like /dev/zero) where st_size is meaningless and would
+    bypass the size cap. Missing files raise FileNotFoundError (from stat) and
+    oversize / non-regular files raise ValueError; both are caught by the call
+    site in generate_image().
+
+    This is the preferred loader for callers that hand bytes straight to the
+    SDK (``types.Part.from_bytes``); :func:`load_image_as_base64` wraps it for
+    the rarer base64-string use case.
     """
     resolved_stat = image_path.resolve().stat()
     if not stat.S_ISREG(resolved_stat.st_mode):
@@ -871,6 +738,17 @@ def load_image_as_base64(image_path: Path) -> tuple[str, str]:
         )
         print(f"  Using detected MIME type: {mime_type}")
 
+    return raw_data, mime_type
+
+
+def load_image_as_base64(image_path: Path) -> tuple[str, str]:
+    """Load an image file and return base64-encoded data and mime type.
+
+    Thin wrapper around :func:`load_image_bytes` retained for callers and tests
+    that want the base64 form. New code that passes bytes to the SDK should call
+    :func:`load_image_bytes` directly to avoid an encode/decode round-trip.
+    """
+    raw_data, mime_type = load_image_bytes(image_path)
     data = base64.standard_b64encode(raw_data).decode("utf-8")
     return data, mime_type
 
@@ -996,61 +874,15 @@ This folder contains images generated by AI models. Each entry documents the mod
         print("✓ Documented in PROMPTS.md")
 
 
-def generate_image(
-    prompt: str,
-    model_key: str = DEFAULT_MODEL,
-    reference_images: list[Path] | None = None,
-    output_path: Path | None = None,
-    aspect_ratio: str | None = None,
-    image_size: str | None = None,
-    use_search: bool = False,
-    save_thoughts: bool = False,
-    verbose: bool = False,
-    is_draft: bool = False,
-    document_prompt: bool = True,
-    thinking_level: str | None = None,
-) -> Path | None:
+def _build_contents(prompt: str, reference_images: list[Path] | None) -> list | None:
+    """Build the Gemini ``contents`` list: reference-image parts + the prompt.
+
+    Reference images are loaded as raw bytes (no base64 round-trip) and handed
+    to ``types.Part.from_bytes``. Returns ``None`` if a provided reference image
+    cannot be loaded, which the caller surfaces as a soft failure (returns
+    ``None``), preserving the legacy behavior.
     """
-    Generate an image using Gemini.
-
-    Args:
-        prompt: Text description of the image to generate
-        model_key: Model to use ('flash', 'flash-2', or 'pro')
-        reference_images: Optional list of reference images for editing/style
-        output_path: Optional output file path
-        aspect_ratio: Aspect ratio (model-dependent; see MODELS[key]['aspect_ratios'])
-        image_size: Image size (model-dependent; see MODELS[key]['image_sizes'])
-        use_search: Enable Google Search grounding (pro/flash-2)
-        save_thoughts: Save intermediate thought images (pro/flash-2)
-        verbose: Show detailed thinking process and thought signatures
-        thinking_level: 'minimal' or 'high' (flash-2 only)
-
-    Returns:
-        Path to the generated image, or None on failure
-    """
-    api_key = get_api_key()
-
-    if model_key not in MODELS:
-        raise ConfigError(
-            f"Unknown model '{model_key}'. Use --list-models to see options."
-        )
-
-    model_config = MODELS[model_key]
-    model_id = model_config["id"]
-
-    print(f"Using model: {model_config['name']}")
-    print(f"Prompt: {prompt[:100]}{'...' if len(prompt) > 100 else ''}")
-
-    # Initialize client
-    # #CRITICAL -- api_key is passed directly to genai.Client; never log
-    #              client objects or request headers in debug mode.
-    # #VERIFY   -- Confirm GEMINI_API_KEY is not echoed in any log handler.
-    client = genai.Client(api_key=api_key)
-
-    # Build the content parts
     contents: list = []
-
-    # Add reference images if provided
     if reference_images:
         for img_path in reference_images:
             if not img_path.exists():
@@ -1059,23 +891,32 @@ def generate_image(
 
             print(f"Including reference image: {img_path}")
             try:
-                img_data, mime_type = load_image_as_base64(img_path)
+                img_bytes, mime_type = load_image_bytes(img_path)
             except (ValueError, OSError) as exc:
                 log.error(f"Error: cannot load reference image {img_path}: {exc}")
                 return None
-            contents.append(
-                types.Part.from_bytes(
-                    data=base64.standard_b64decode(img_data),
-                    mime_type=mime_type,
-                )
-            )
+            contents.append(types.Part.from_bytes(data=img_bytes, mime_type=mime_type))
 
-    # Add the text prompt
     contents.append(prompt)
+    return contents
 
-    # Build config kwargs (heterogeneous: lists, dicts, model objects,
-    # bools). Annotated as ``dict[str, Any]`` so the static checker does not
-    # constrain later assignments to the initial value's type.
+
+def _build_generate_config(
+    model_config: dict[str, Any],
+    aspect_ratio: str | None,
+    image_size: str | None,
+    *,
+    use_search: bool,
+    thinking_level: str | None,
+) -> Any:
+    """Build the ``types.GenerateContentConfig`` for a generation request.
+
+    Emits user-facing warnings (to stdout) when aspect/size/thinking options
+    are passed to a model that cannot honor them, matching legacy behavior.
+    """
+    # Build config kwargs (heterogeneous: lists, dicts, model objects, bools).
+    # Annotated as ``dict[str, Any]`` so the static checker does not constrain
+    # later assignments to the initial value's type.
     config_kwargs: dict[str, Any] = {
         "response_modalities": ["IMAGE", "TEXT"],
     }
@@ -1152,8 +993,134 @@ def generate_image(
             )
             print(f"Thinking level: {thinking_level}")
 
-    # Configure generation
-    generate_config = types.GenerateContentConfig(**config_kwargs)
+    return types.GenerateContentConfig(**config_kwargs)
+
+
+def _resolve_generated_output_path(
+    output_path: Path | None,
+    detected_ext: str,
+    script_dir: Path,
+    *,
+    is_draft: bool,
+) -> Path:
+    """Determine the on-disk path for a generated image.
+
+    Corrects the extension to the format detected from magic bytes and
+    re-anchors any path that does not already resolve under the repo-root
+    ``output/`` tree into ``output/drafts``, ``output/finals``, or ``output/``.
+    """
+    if output_path is None:
+        timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
+        # Random suffix makes default filenames non-guessable when the output/
+        # directory is later served or shared. Avoids reliance on
+        # second-resolution timestamps for uniqueness.
+        token = secrets.token_hex(16)
+        if is_draft:
+            return script_dir / f"output/drafts/draft_{timestamp}_{token}{detected_ext}"
+        return script_dir / f"output/generated_{timestamp}_{token}{detected_ext}"
+
+    # If user specified path, check if extension matches actual format
+    user_ext = output_path.suffix.lower()
+    if user_ext and user_ext != detected_ext:
+        # User specified different extension - correct it
+        print(
+            f"Warning: Specified extension {user_ext} doesn't match actual format {detected_ext}"
+        )
+        output_path = output_path.with_suffix(detected_ext)
+        print(f"  Saving as: {output_path.name}")
+    elif not user_ext:
+        # No extension specified - add the detected one
+        output_path = output_path.with_suffix(detected_ext)
+
+    # Re-anchor any path that does not already resolve to a subdirectory of the
+    # repo-root ``output/``. Resolving both sides avoids the prior
+    # ``str.startswith("output")`` check, which a path like
+    # ``output/../../../etc/cron.d/x`` would satisfy textually while resolving
+    # outside the tree.
+    allowed_root = (script_dir / "output").resolve()
+    try:
+        resolved_out = output_path.resolve()
+    except (OSError, RuntimeError):
+        # OSError: filesystem-level failures. RuntimeError: symlink loops
+        # (``Path.resolve`` raises this on an infinite resolution path). Either
+        # way, an unresolvable path is treated as "not under output/" and
+        # re-anchored into the safe tree below rather than crashing the CLI.
+        resolved_out = None
+    if resolved_out is None or not resolved_out.is_relative_to(allowed_root):
+        if is_draft:
+            return script_dir / "output/drafts" / output_path.name
+        # Check if this looks like a final (contains "final" in name)
+        if "final" in output_path.stem.lower():
+            return script_dir / "output/finals" / output_path.name
+        return script_dir / "output" / output_path.name
+    return output_path
+
+
+def generate_image(
+    prompt: str,
+    model_key: str = DEFAULT_MODEL,
+    reference_images: list[Path] | None = None,
+    output_path: Path | None = None,
+    aspect_ratio: str | None = None,
+    image_size: str | None = None,
+    use_search: bool = False,
+    save_thoughts: bool = False,
+    verbose: bool = False,
+    is_draft: bool = False,
+    document_prompt: bool = True,
+    thinking_level: str | None = None,
+) -> Path | None:
+    """
+    Generate an image using Gemini.
+
+    Args:
+        prompt: Text description of the image to generate
+        model_key: Model to use ('flash', 'flash-2', or 'pro')
+        reference_images: Optional list of reference images for editing/style
+        output_path: Optional output file path
+        aspect_ratio: Aspect ratio (model-dependent; see MODELS[key]['aspect_ratios'])
+        image_size: Image size (model-dependent; see MODELS[key]['image_sizes'])
+        use_search: Enable Google Search grounding (pro/flash-2)
+        save_thoughts: Save intermediate thought images (pro/flash-2)
+        verbose: Show detailed thinking process and thought signatures
+        thinking_level: 'minimal' or 'high' (flash-2 only)
+
+    Returns:
+        Path to the generated image, or None on failure
+    """
+    api_key = get_api_key()
+
+    if model_key not in MODELS:
+        raise ConfigError(
+            f"Unknown model '{model_key}'. Use --list-models to see options."
+        )
+
+    model_config = MODELS[model_key]
+    model_id = model_config["id"]
+
+    print(f"Using model: {model_config['name']}")
+    print(f"Prompt: {prompt[:100]}{'...' if len(prompt) > 100 else ''}")
+
+    # Initialize client
+    # #CRITICAL -- api_key is passed directly to genai.Client; never log
+    #              client objects or request headers in debug mode.
+    # #VERIFY   -- Confirm GEMINI_API_KEY is not echoed in any log handler.
+    client = genai.Client(api_key=api_key)
+
+    # Build the content parts (reference images + prompt). A failed reference
+    # load is a soft failure: _build_contents returns None and we propagate it.
+    contents = _build_contents(prompt, reference_images)
+    if contents is None:
+        return None
+
+    # Configure generation (aspect/size/search/thinking warnings emitted inside).
+    generate_config = _build_generate_config(
+        model_config,
+        aspect_ratio,
+        image_size,
+        use_search=use_search,
+        thinking_level=thinking_level,
+    )
 
     try:
         print("Generating image...")
@@ -1292,58 +1259,11 @@ def generate_image(
             # Get script directory for output paths
             script_dir = Path(__file__).parent.parent
 
-            # Determine output filename and auto-organize into drafts/finals
-            if output_path is None:
-                timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
-                # Random suffix makes default filenames non-guessable when the
-                # output/ directory is later served or shared. Avoids reliance
-                # on second-resolution timestamps for uniqueness.
-                token = secrets.token_hex(16)
-                ext = detected_ext  # Use detected format, not MIME type
-
-                # Auto-organize: drafts go to drafts/, finals would go to root
-                if is_draft:
-                    output_path = (
-                        script_dir / f"output/drafts/draft_{timestamp}_{token}{ext}"
-                    )
-                else:
-                    output_path = (
-                        script_dir / f"output/generated_{timestamp}_{token}{ext}"
-                    )
-            else:
-                # If user specified path, check if extension matches actual format
-                user_ext = output_path.suffix.lower()
-                if user_ext and user_ext != detected_ext:
-                    # User specified different extension - correct it
-                    print(
-                        f"Warning: Specified extension {user_ext} doesn't match actual format {detected_ext}"
-                    )
-                    output_path = output_path.with_suffix(detected_ext)
-                    print(f"  Saving as: {output_path.name}")
-                elif not user_ext:
-                    # No extension specified - add the detected one
-                    output_path = output_path.with_suffix(detected_ext)
-
-                # Re-anchor any path that does not already resolve to a
-                # subdirectory of the repo-root ``output/``. Resolving both
-                # sides avoids the prior ``str.startswith("output")`` check,
-                # which a path like ``output/../../../etc/cron.d/x`` would
-                # satisfy textually while resolving outside the tree.
-                allowed_root = (script_dir / "output").resolve()
-                try:
-                    resolved_out = output_path.resolve()
-                except OSError:
-                    resolved_out = None
-                if resolved_out is None or not resolved_out.is_relative_to(
-                    allowed_root
-                ):
-                    if is_draft:
-                        output_path = script_dir / "output/drafts" / output_path.name
-                    # Check if this looks like a final (contains "final" in name)
-                    elif "final" in output_path.stem.lower():
-                        output_path = script_dir / "output/finals" / output_path.name
-                    else:
-                        output_path = script_dir / "output" / output_path.name
+            # Determine output filename and auto-organize into drafts/finals,
+            # correcting the extension to the detected format.
+            output_path = _resolve_generated_output_path(
+                output_path, detected_ext, script_dir, is_draft=is_draft
+            )
 
             # Ensure output directory exists and write the image. OSError
             # here means a real disk-side failure (full disk, permission
@@ -1545,10 +1465,11 @@ def list_models():
         print()
 
 
-def _run() -> None:
-    """CLI body. Raises ``AppError`` for expected failures and ``SystemExit``
-    for terminal cases; :func:`main` is the user-facing entry point that
-    translates ``AppError`` to a clean stderr message + exit code 1.
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Construct the argparse parser for the CLI.
+
+    Extracted from :func:`_run` so the (large) flag definitions live apart from
+    the dispatch logic and can be inspected/tested in isolation.
     """
     parser = argparse.ArgumentParser(
         description="Generate images using Google Gemini (Nano Banana / Nano Banana 2 / Nano Banana Pro)",
@@ -1733,6 +1654,15 @@ Examples:
         help="Face enhancement strength 0.0-1.0 (used with --topaz-face-enhance)",
     )
 
+    return parser
+
+
+def _run() -> None:
+    """CLI body. Raises ``AppError`` for expected failures and ``SystemExit``
+    for terminal cases; :func:`main` is the user-facing entry point that
+    translates ``AppError`` to a clean stderr message + exit code 1.
+    """
+    parser = _build_arg_parser()
     args = parser.parse_args()
 
     # Reconfigure structlog now that we know the verbosity flag.
@@ -1998,6 +1928,11 @@ def main() -> None:
     prefix so users can distinguish "expected failure" from "this is a
     bug, please report it".
     """
+    # Configure logging up front (non-verbose default) so any error raised
+    # before ``_run`` re-configures with the parsed ``--verbose`` flag is still
+    # emitted through the structured stderr pipeline. Replaces the former
+    # import-time ``_configure_logging`` side effect.
+    _configure_logging(verbose=False)
     try:
         _run()
     except AppError as exc:
