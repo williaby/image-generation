@@ -1096,7 +1096,10 @@ class TestGenerateImageProModel:
             if hasattr(only_tool, "google_search")
             else only_tool["google_search"]
         )
-        assert google_search is not None
+        if isinstance(google_search, dict):
+            assert google_search == {}
+        else:
+            assert google_search.model_dump(exclude_none=True) == {}
 
     def test_invalid_aspect_ratio_warns_and_continues(
         self,
@@ -3689,8 +3692,8 @@ class TestSettingsLoaderEdgeCases:
                 raise OSError("simulated unreadable .env")
             return real_settings_cls(*args, **kwargs)
 
-        fake_settings = MagicMock(side_effect=settings_factory)
-        monkeypatch.setattr(mod, "Settings", fake_settings)
+        mock_settings_cls = MagicMock(side_effect=settings_factory)
+        monkeypatch.setattr(mod, "Settings", mock_settings_cls)
 
         settings = mod.get_settings()
 
@@ -3702,9 +3705,9 @@ class TestSettingsLoaderEdgeCases:
         # (None). This confirms the fallback loaded from the process env only,
         # not from any .env values.
         assert settings.TOPAZ_API_KEY is None
-        assert fake_settings.call_count == 2
+        assert mock_settings_cls.call_count == 2
         # Only the ``_env_file`` contract matters; tolerate future extra kwargs.
-        assert fake_settings.call_args.kwargs.get("_env_file") is None
+        assert mock_settings_cls.call_args.kwargs.get("_env_file") is None
         # The fallback must be announced. ``log`` writes via structlog's
         # _StderrLoggerFactory (not stdlib logging), so the warning lands on
         # stderr where capsys captures it -- caplog would not see it.
