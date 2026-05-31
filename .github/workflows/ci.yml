@@ -89,9 +89,11 @@ jobs:
         # Fails if any tracked file contains a secret not recorded in
         # .secrets.baseline. Mirrors the pre-commit detect-secrets hook; run as
         # an isolated tool so it does not enter the project dependency surface.
+        # The exclude uses extended regex (-E) so the optional `(.*/)?` prefix
+        # also skips a baseline placed in a subdirectory, not just at the root.
         run: |
           git ls-files -z \
-            | grep -zv '^\.secrets\.baseline$' \
+            | grep -zvE '^(.*/)?\.secrets\.baseline$' \
             | xargs -0 uvx --from 'detect-secrets==1.5.0' detect-secrets-hook --baseline .secrets.baseline
 
       - name: Dependency audit (pip-audit)
