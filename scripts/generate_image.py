@@ -598,6 +598,29 @@ def _build_topaz_form_data(
     return data
 
 
+# Topaz request tuning. Defined ahead of the functions that use them (the submit /
+# poll / download helpers below) so the whole retry-and-timeout envelope reads in
+# one place.
+_TOPAZ_POLL_ITERATIONS = 25
+_TOPAZ_POLL_INITIAL_WAIT = 2.0
+_TOPAZ_POLL_429_MULTIPLIER = 2.0
+_TOPAZ_POLL_429_MAX_WAIT = 30.0
+_TOPAZ_POLL_DEFAULT_MULTIPLIER = 1.5
+_TOPAZ_POLL_DEFAULT_MAX_WAIT = 15.0
+
+# Per-request HTTP timeouts (seconds). Submit uploads the source image so it gets
+# a longer budget than the lightweight status/download-URL calls; the final image
+# download is the largest transfer and gets the longest.
+_TOPAZ_SUBMIT_TIMEOUT = 30
+_TOPAZ_STATUS_TIMEOUT = 15
+_TOPAZ_DOWNLOAD_URL_TIMEOUT = 15
+_TOPAZ_IMAGE_DOWNLOAD_TIMEOUT = 120
+
+# Max characters of an upstream response body to echo into an error/log message.
+# Bounds log size while keeping enough of the payload to debug a bad response.
+_LOG_BODY_TRUNCATION = 200
+
+
 def _topaz_submit_job(
     endpoint_url: str,
     headers: dict,
@@ -661,26 +684,6 @@ def _topaz_submit_job(
     if verbose:
         print(f"  Job submitted: {process_id}")
     return process_id
-
-
-_TOPAZ_POLL_ITERATIONS = 25
-_TOPAZ_POLL_INITIAL_WAIT = 2.0
-_TOPAZ_POLL_429_MULTIPLIER = 2.0
-_TOPAZ_POLL_429_MAX_WAIT = 30.0
-_TOPAZ_POLL_DEFAULT_MULTIPLIER = 1.5
-_TOPAZ_POLL_DEFAULT_MAX_WAIT = 15.0
-
-# Per-request HTTP timeouts (seconds). Submit uploads the source image so it gets
-# a longer budget than the lightweight status/download-URL calls; the final image
-# download is the largest transfer and gets the longest.
-_TOPAZ_SUBMIT_TIMEOUT = 30
-_TOPAZ_STATUS_TIMEOUT = 15
-_TOPAZ_DOWNLOAD_URL_TIMEOUT = 15
-_TOPAZ_IMAGE_DOWNLOAD_TIMEOUT = 120
-
-# Max characters of an upstream response body to echo into an error/log message.
-# Bounds log size while keeping enough of the payload to debug a bad response.
-_LOG_BODY_TRUNCATION = 200
 
 
 def _topaz_poll_job(process_id: str, headers: dict, verbose: bool) -> None:
