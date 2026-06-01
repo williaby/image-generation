@@ -127,18 +127,16 @@ ignore = [
 #   because pytest fixture parameters appear as "unused" to static analysis.
 #
 # scripts/generate_image.py: CLI script with an extensive boolean flag API and
-#   dynamic try/except imports. The GCA-001 follow-on extracted helpers
-#   (_build_contents, _build_generate_config, _resolve_generated_output_path,
-#   _poll_topaz_status, _fetch_topaz_download_url, _download_topaz_image,
-#   _resolve_topaz_output_path, _build_arg_parser) and config/image-utility
-#   modules (scripts/_config.py, scripts/_images.py), which materially reduced
-#   per-function complexity. C901 / PLR are still suppressed because residual
-#   complexity remains in the response-parsing and CLI-dispatch paths and,
-#   critically, the wide boolean-flag signatures keep tripping PLR0913
-#   (too-many-args); fully clearing those requires the separately-tracked
-#   request/options-object refactor (FBT). PTH123 (open() -> Path.open()) and
-#   D* (docstring style) are tracked separately. T20 (print) is expected for a
-#   CLI producing user-facing output.
+#   dynamic try/except imports. The GCA-001 follow-on extracted helper functions
+#   and config/image-utility modules (_config.py, _images.py), materially
+#   reducing per-function complexity. C901 and PLR remain suppressed because
+#   residual complexity in topaz_enhance_image (C901 24), generate_image
+#   (C901 28), _run (C901 26), and others cannot be cleared without the
+#   separately-tracked FBT options-object refactor. PLR0913 fires on four
+#   functions with wide boolean-flag signatures; PLR0912/0915/2004 are residual
+#   in the same set. PTH123 (open() -> Path.open()) and D* (docstring style)
+#   are tracked separately. T20 (print) is expected for a CLI producing
+#   user-facing output.
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
     "S101",                    # asserts are fine in tests
@@ -161,13 +159,17 @@ ignore = [
     "TRY",                     # exception flow predates TRY rules
     "BLE",                     # blind-except in error reporting paths
     "EM",                      # error-message formatting style legacy
-    "PLR",                     # PLR0913 (too-many-args) is inherent to the
-                               # boolean-flag API; PLR2004/0912/0915 residual
+    "PLR",                     # PLR0913 fires on topaz_enhance_image, document_image_prompt,
+                               # generate_image, generate_story_sequence (wide boolean-flag
+                               # signatures; clearing requires FBT options-object refactor).
+                               # PLR0912/0915 in topaz_enhance_image, _build_generate_config,
+                               # generate_image, _run; PLR2004 in comparison expressions.
     "TCH",                     # imports load at module scope by design
     "ERA",                     # commented-out reference code retained
     "T20",                     # CLI tool -- print() is user-facing output, not debug
     "PTH123",                  # pathlib migration deferred to cleanup pass
-    "C901",                    # residual complexity in dispatch/parse paths
+    "C901",                    # complexity in topaz_enhance_image (24), generate_image (28),
+                               # _run (26), _build_generate_config (12), document_image_prompt (12)
     "D",                       # docstring style cleanup tracked separately
     "ARG001",                  # unused arg tracked separately
     "ARG002",                  # unused method args (structlog logger shim methods)

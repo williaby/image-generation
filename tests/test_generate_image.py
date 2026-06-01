@@ -1099,6 +1099,8 @@ class TestGenerateImageProModel:
         if isinstance(google_search, dict):
             assert google_search == {}
         else:
+            # Empty config is correct: grounding needs no parameters. A future failure
+            # here likely means the SDK added a default-populated field, not a real bug.
             assert google_search.model_dump(exclude_none=True) == {}
 
     def test_invalid_aspect_ratio_warns_and_continues(
