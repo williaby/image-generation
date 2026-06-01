@@ -41,6 +41,7 @@ dev = [
     "bandit>=1.7.5",
     "pip-audit>=2.7.0",
     "hypothesis>=6.0.0,<7.0.0",
+    "pydoclint>=0.8.4",
 ]
 
 [tool.ruff]
@@ -120,10 +121,11 @@ ignore = [
 #
 # scripts/generate_image.py: legacy CLI script with extensive boolean flag API,
 #   dynamic try/except imports, and complexity that predates current rule set.
-#   PTH123 (open() -> Path.open()), C901 (complexity), D* (docstring style),
-#   and ARG001 are all tracked for a dedicated cleanup pass outside this
-#   compliance audit (GCA-001 follow-on). N806 and PLW2901 were dropped once
-#   the file stopped triggering them (0 violations each).
+#   PTH123 (open() -> Path.open()), D* (docstring style), and ARG001 are all
+#   tracked for a dedicated cleanup pass outside this compliance audit
+#   (GCA-001 follow-on). N806 and PLW2901 were dropped once the file stopped
+#   triggering them (0 violations each). C901 (complexity) was removed after
+#   the hot functions were decomposed.
 #   T20 (print) is expected for a CLI tool producing user-facing output.
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
@@ -152,7 +154,6 @@ ignore = [
     "ERA",                     # commented-out reference code retained
     "T20",                     # CLI tool -- print() is user-facing output, not debug
     "PTH123",                  # pathlib migration deferred to cleanup pass
-    "C901",                    # complexity refactor tracked separately
     "D",                       # docstring style cleanup tracked separately
     "ARG001",                  # unused arg tracked separately
     "ARG002",                  # unused method args (structlog logger shim methods)
@@ -220,3 +221,13 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "raise NotImplementedError",
 ]
+
+[tool.pydoclint]
+style = "google"
+exclude = '\.git|tests/|scripts/|benchmarks/|tools/|noxfile\.py|\.claude/'
+arg-type-hints-in-docstring = true
+arg-type-hints-in-signature = true
+skip-checking-raises = false
+require-return-section-when-returning-nothing = false
+require-return-section-when-returning-values = false
+require-yield-section-when-yielding-values = false

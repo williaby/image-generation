@@ -33,6 +33,9 @@ jobs:
       run-codeql: false
       run-dependency-review: true
       run-osv: false
+      # Bandit runs as an explicit, repo-controlled blocking step in ci.yml
+      # (python-quality job) using [tool.bandit] in pyproject.toml, so it is
+      # left disabled here to avoid a duplicate run with different config.
       run-bandit: false
 
   security-gate-validation:
