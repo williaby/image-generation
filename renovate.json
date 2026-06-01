@@ -53,6 +53,12 @@
       "matchDepTypes": ["requires-python"],
       "enabled": false,
       "labels": ["dependencies", "python-version", "breaking-change"]
+    },
+    {
+      "description": "Refresh SHA pins for org reusable workflows that float the v1 tag. pinDigests (rule 3) handles the initial pin; this rule groups the digest-refresh PRs for ByronWilliamsCPA/.github and williaby/.github so they don't generate noise as individual updates.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["/ByronWilliamsCPA\\/\\.github/", "/williaby\\/\\.github/"],
+      "groupName": "Org workflow SHA pins"
     }
   ],
   "enabledManagers": [

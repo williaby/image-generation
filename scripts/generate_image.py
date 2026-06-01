@@ -79,46 +79,29 @@ import structlog
 from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# When this file is executed directly (``uv run scripts/generate_image.py``),
-# Python puts the ``scripts/`` directory on ``sys.path[0]`` rather than the repo
-# root, so the sibling-module imports below would fail with ModuleNotFoundError.
-# Prepend the repo root so ``scripts`` is importable as a package in that case.
-# When imported as ``scripts.generate_image`` (tests, ``python -m``) __package__
-# is set and this is a no-op.
-if not __package__:
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-# Configuration / data layer and pure image helpers live in sibling modules.
-# They are re-imported here (rather than referenced via attribute access) so
-# that existing call sites -- and the test suite, which imports and patches
-# these names through ``scripts.generate_image`` -- keep resolving unchanged.
-from scripts._config import (
-    ASPECT_RATIOS,
-    DEFAULT_MODEL,
-    DEFAULT_TOPAZ_MODEL,
-    IMAGE_SIZES,
-    MAX_INPUT_IMAGE_BYTES,
-    MODELS,
-    THINKING_LEVELS,
-    TOPAZ_BASE_URL,
-    TOPAZ_DOWNLOAD_HOSTS,
-    TOPAZ_MODELS,
-    AppError,
-    ConfigError,
-    FileIOError,
-    GeminiAPIError,
-    TopazAPIError,
-)
-from scripts._images import (
-    detect_image_format,
-    get_extension_for_mime,
-)
+from scripts import _config as _config_module
+from scripts import _images as _images_module
 
 # Compatibility shim for the ``datetime.UTC`` constant. Python 3.11 added
 # ``datetime.UTC`` as an alias for ``datetime.timezone.utc``; we target
 # 3.10+, so use the older spelling and expose ``UTC`` here for the rest of
 # the module to import.
 UTC = timezone.utc
+
+# Hard cap on reference / enhancement input image size. 4K PNGs are ~10 MiB;
+# 100 MiB is generous and protects against pathological local inputs that would
+# otherwise be fully loaded into memory. Peak memory is roughly 2.33x the input
+# size because both the raw bytes and the base64-encoded copy (~1.33x expansion)
+# are held simultaneously before the API call.
+MAX_INPUT_IMAGE_BYTES = 100 * 1024 * 1024
+
+# Topaz Labs download host allowlist. SSRF guard for the image fetch step in
+# topaz_enhance_image: Topaz returns a signed download URL; we restrict the
+# host to a known allowlist before issuing the GET. Kept at module scope so
+# the security boundary is visible at audit time, not buried mid-function.
+TOPAZ_DOWNLOAD_HOSTS: frozenset[str] = frozenset(
+    {"api.topazlabs.com", "cdn.topazlabs.com"}
+)
 
 # ``google-genai`` is a hard dependency declared in pyproject.toml, but tests
 # in CI environments sometimes install it lazily. The try/except preserves
@@ -146,6 +129,11 @@ GENAI_AVAILABLE: bool = _genai_imported
 # flag to False at runtime via monkeypatch triggers the same code path that a
 # missing import would.
 HTTPX_AVAILABLE: bool = True
+
+# Backwards-compatible alias retained so that downstream code or tests written
+# against the legacy ``REQUESTS_AVAILABLE`` flag continue to work. ``requests``
+# itself is no longer imported; ``httpx`` is the canonical HTTP client.
+REQUESTS_AVAILABLE: bool = HTTPX_AVAILABLE
 
 
 class _StderrLogger:
@@ -214,14 +202,155 @@ def _configure_logging(verbose: bool = False) -> None:
     )
 
 
-# Logging is configured by the entry point (``main`` calls ``_configure_logging``
-# before any work, and ``_run`` re-configures once it has parsed ``--verbose``),
-# NOT at import time. Importing this module therefore has no global side effect
-# on structlog. ``log`` below is a lazy proxy: with
-# ``cache_logger_on_first_use=False`` it resolves the active configuration on
-# every call, so it works whether configuration happened in ``main`` (runtime)
-# or in the autouse ``configure_logging`` fixture in ``tests/conftest.py`` (tests).
+# #CRITICAL: Module-import side effect. ``structlog.configure(...)`` mutates
+# global processor state, so any test that imports this module observes the
+# configured pipeline regardless of fixture isolation. The deferred-import
+# pattern in tests/CLAUDE.md helps but does not eliminate this -- once a test
+# body imports ``scripts.generate_image``, all subsequent ``structlog.get_logger``
+# calls in the test process use this config.
+# #VERIFY: tests/test_generate_image.py exercises the _configure_logging path
+# at least once (currently via _StderrLogger capsys interaction); add a direct
+# assertion that re-calling _configure_logging is idempotent.
+# ``_run`` re-configures after parsing ``--verbose``.
+_configure_logging(verbose=False)
 log = structlog.get_logger(__name__)
+
+
+# Model configurations
+# Each entry carries its own aspect_ratios / image_sizes because the three
+# Gemini image models accept different sets. Heterogeneous values are typed
+# as ``Any`` so the static checker does not treat ``MODELS[key]["foo"]`` as a
+# concrete union; per-call site checks (e.g. ``if not supports_image_config``)
+# operate on the values directly.
+MODELS: dict[str, dict[str, Any]] = {
+    "flash": {
+        "id": "gemini-2.5-flash-image",
+        "name": "Nano Banana (Gemini 2.5 Flash)",
+        "description": "Legacy fast image generation model (no aspect/size control)",
+        "supports_image_config": False,
+        "supports_thinking_config": False,
+        "aspect_ratios": [],
+        "image_sizes": [],
+    },
+    "flash-2": {
+        "id": "gemini-3.1-flash-image-preview",
+        "name": "Nano Banana 2 (Gemini 3.1 Flash Image)",
+        "description": "Pro-quality reasoning at Flash speed; 512/1K/2K/4K, 14 aspect ratios, configurable thinking, Search grounding",
+        "supports_image_config": True,
+        "supports_thinking_config": True,
+        "aspect_ratios": [
+            "1:1",
+            "1:4",
+            "1:8",
+            "2:3",
+            "3:2",
+            "3:4",
+            "4:1",
+            "4:3",
+            "4:5",
+            "5:4",
+            "8:1",
+            "9:16",
+            "16:9",
+            "21:9",
+        ],
+        "image_sizes": ["512", "1K", "2K", "4K"],
+    },
+    "pro": {
+        "id": "gemini-3-pro-image-preview",
+        "name": "Nano Banana Pro (Gemini 3 Pro)",
+        "description": "Highest quality, best text rendering, Google Search grounding, thinking mode",
+        "supports_image_config": True,
+        "supports_thinking_config": False,
+        "aspect_ratios": ["1:1", "3:4", "4:3", "9:16", "16:9"],
+        "image_sizes": ["1K", "2K", "4K"],
+    },
+}
+
+DEFAULT_MODEL = "flash-2"  # Google's new default; Pro-quality at Flash speed.
+
+# Union of valid values across all models (used for argparse choices). Derived
+# from MODELS so a future model edit cannot silently desync the CLI from the
+# actual capabilities. Per-model validation still happens inside
+# generate_image() against MODELS[key] for accurate error messages.
+# dict.fromkeys preserves first-seen order while deduplicating.
+ASPECT_RATIOS = list(
+    dict.fromkeys(r for m in MODELS.values() for r in m.get("aspect_ratios", []))
+)
+IMAGE_SIZES = list(
+    dict.fromkeys(s for m in MODELS.values() for s in m.get("image_sizes", []))
+)
+
+# Valid thinking levels for models that support thinking_config.
+THINKING_LEVELS = ["minimal", "high"]
+
+# Topaz Labs API base URL
+TOPAZ_BASE_URL = "https://api.topazlabs.com/image/v1"
+
+# Topaz model registry: "enhance" -> /enhance/async; "enhance-gen" -> /enhance-gen/async
+# Generative models (Wonder, Bloom) cost ~6-12x more credits than precision models.
+TOPAZ_MODELS = {
+    # Gigapixel precision upscaling (24 MP per credit)
+    "Standard V2": {
+        "endpoint": "enhance/async",
+        "description": "Precision upscaling, best for most images",
+    },
+    "High Fidelity V2": {
+        "endpoint": "enhance/async",
+        "description": "Highest quality, preserves fine detail",
+    },
+    "Low Resolution V2": {
+        "endpoint": "enhance/async",
+        "description": "Optimized for very low-resolution sources",
+    },
+    "CGI": {
+        "endpoint": "enhance/async",
+        "description": "Optimized for CGI and rendered imagery",
+    },
+    "Text Refine": {
+        "endpoint": "enhance/async",
+        "description": "Preserves and sharpens text in diagrams",
+    },
+    "Detail Faces": {
+        "endpoint": "enhance/async",
+        "description": "Enhances facial clarity",
+    },
+    "Recover Faces": {
+        "endpoint": "enhance/async",
+        "description": "Restores damaged or degraded faces",
+    },
+    "Transparency Upscale": {
+        "endpoint": "enhance/async",
+        "description": "Upscales images with alpha transparency",
+    },
+    # Generative upscaling (4 MP per credit; significantly more expensive)
+    "Wonder": {
+        "endpoint": "enhance-gen/async",
+        "description": "Generative upscaling, adds intelligent detail",
+    },
+    "Wonder 2": {
+        "endpoint": "enhance-gen/async",
+        "description": "Improved generative upscaling",
+    },
+    "Standard Max": {
+        "endpoint": "enhance-gen/async",
+        "description": "Maximum quality generative upscaling",
+    },
+    "Recover 3": {
+        "endpoint": "enhance-gen/async",
+        "description": "Advanced recovery with generation",
+    },
+    "Redefine": {
+        "endpoint": "enhance-gen/async",
+        "description": "Creative reinterpretation with upscaling",
+    },
+    "Bloom": {
+        "endpoint": "enhance-gen/async",
+        "description": "Creative upscaling for AI-generated art",
+    },
+}
+
+DEFAULT_TOPAZ_MODEL = "Standard V2"
 
 
 # Repo-root .env path used by ``Settings``. Resolved at module import; the
@@ -294,6 +423,58 @@ def get_settings() -> Settings:
         ) from exc
 
 
+# ---------------------------------------------------------------------------
+# Typed exception hierarchy
+# ---------------------------------------------------------------------------
+
+
+class AppError(Exception):
+    """Base for all expected, user-visible failures in this CLI.
+
+    ``main()`` catches ``AppError`` and produces a clean stderr message + an
+    exit code of 1, instead of a Python traceback. Any subclass implies the
+    failure is part of normal operation (missing config, upstream API error,
+    bad file I/O); programmer bugs should raise ordinary exceptions and
+    surface as tracebacks via the outermost ``except Exception`` safety net.
+    """
+
+
+class ConfigError(AppError):
+    """Configuration is missing or malformed (e.g. unset GEMINI_API_KEY)."""
+
+
+class GeminiAPIError(AppError):
+    """The Gemini API returned an error or unparseable response."""
+
+
+class TopazAPIError(AppError):
+    """The Topaz Labs API returned an error or unparseable response."""
+
+
+class FileIOError(AppError):
+    """An expected file write or read failed (e.g. output directory unwritable)."""
+
+
+# Re-export contract for consumers and tests: these names in
+# scripts.generate_image resolve to the same objects from scripts._config
+# and scripts._images.
+MAX_INPUT_IMAGE_BYTES = _config_module.MAX_INPUT_IMAGE_BYTES  # pyright: ignore[reportConstantRedefinition]
+TOPAZ_DOWNLOAD_HOSTS = _config_module.TOPAZ_DOWNLOAD_HOSTS  # pyright: ignore[reportConstantRedefinition]
+MODELS = _config_module.MODELS  # pyright: ignore[reportConstantRedefinition]
+DEFAULT_MODEL = _config_module.DEFAULT_MODEL  # pyright: ignore[reportConstantRedefinition]
+ASPECT_RATIOS = _config_module.ASPECT_RATIOS  # pyright: ignore[reportConstantRedefinition]
+IMAGE_SIZES = _config_module.IMAGE_SIZES  # pyright: ignore[reportConstantRedefinition]
+THINKING_LEVELS = _config_module.THINKING_LEVELS  # pyright: ignore[reportConstantRedefinition]
+TOPAZ_BASE_URL = _config_module.TOPAZ_BASE_URL  # pyright: ignore[reportConstantRedefinition]
+TOPAZ_MODELS = _config_module.TOPAZ_MODELS  # pyright: ignore[reportConstantRedefinition]
+DEFAULT_TOPAZ_MODEL = _config_module.DEFAULT_TOPAZ_MODEL  # pyright: ignore[reportConstantRedefinition]
+AppError = _config_module.AppError  # pyright: ignore[reportAssignmentType]
+ConfigError = _config_module.ConfigError  # noqa: F811  # pyright: ignore[reportAssignmentType]
+GeminiAPIError = _config_module.GeminiAPIError  # noqa: F811  # pyright: ignore[reportAssignmentType]
+TopazAPIError = _config_module.TopazAPIError  # noqa: F811  # pyright: ignore[reportAssignmentType]
+FileIOError = _config_module.FileIOError  # noqa: F811  # pyright: ignore[reportAssignmentType]
+
+
 def _load_api_key(env_var: str) -> str | None:
     """Load an API key from the environment or the repo-root .env file.
 
@@ -336,202 +517,8 @@ def get_topaz_api_key() -> str | None:
     return api_key
 
 
-# Topaz async-job polling parameters. The status endpoint is polled with
-# exponential backoff; 429 (rate-limit) responses use a steeper factor/cap
-# than ordinary in-progress polls. Named here so the timing policy is visible
-# and adjustable without editing loop internals.
-# #ASSUME: job completes within _TOPAZ_POLL_ITERATIONS poll iterations.
-# Happy-path wall time is ~5 minutes (1.5x backoff capped at 15 s); under
-# sustained HTTP 429 the 2x backoff caps at 30 s, so worst-case is ~12 minutes
-# before the loop reports "did not complete".
-# #VERIFY -- Confirm the iteration count and caps against Topaz SLA docs before
-# changing them.
-# #EDGE: sustained 429 responses exhaust iterations and are reported as "did
-# not complete" (no separate exception type today).
-_TOPAZ_POLL_ITERATIONS = 25
-_TOPAZ_POLL_INITIAL_WAIT = 2.0
-_TOPAZ_POLL_BACKOFF = 1.5
-_TOPAZ_POLL_BACKOFF_MAX = 15.0
-_TOPAZ_POLL_429_BACKOFF = 2.0
-_TOPAZ_POLL_429_BACKOFF_MAX = 30.0
-
-_TOPAZ_OUTPUT_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
-
-
-def _poll_topaz_status(
-    process_id: str, headers: dict[str, str], *, verbose: bool
-) -> None:
-    """Poll the Topaz status endpoint until the job completes.
-
-    Returns once the job status is ``Completed``. Raises :class:`TopazAPIError`
-    on a ``Failed``/``Error`` status, on transport/JSON errors, or when the
-    polling limit is exhausted (which also covers sustained 429 backoff).
-    """
-    wait = _TOPAZ_POLL_INITIAL_WAIT
-    for _ in range(_TOPAZ_POLL_ITERATIONS):
-        time.sleep(wait)
-        try:
-            status_resp = httpx.get(
-                f"{TOPAZ_BASE_URL}/status/{process_id}",
-                headers=headers,
-                timeout=15,
-            )
-            if status_resp.status_code == 429:
-                wait = min(wait * _TOPAZ_POLL_429_BACKOFF, _TOPAZ_POLL_429_BACKOFF_MAX)
-                continue
-            status_resp.raise_for_status()
-            status_payload = status_resp.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise TopazAPIError(
-                f"Error polling Topaz status for job {process_id}: {exc}"
-            ) from exc
-        if not isinstance(status_payload, dict):
-            raise TopazAPIError(
-                f"Topaz status response for job {process_id} was "
-                f"not a JSON object (got {type(status_payload).__name__})"
-            )
-        status = status_payload.get("status", "")
-        if verbose:
-            print(f"  Status: {status}")
-        if status == "Completed":
-            return
-        if status in ("Failed", "Error"):
-            raise TopazAPIError(f"Topaz job {process_id} failed (status: {status})")
-        wait = min(wait * _TOPAZ_POLL_BACKOFF, _TOPAZ_POLL_BACKOFF_MAX)
-    raise TopazAPIError(
-        f"Topaz job {process_id} did not complete within the polling limit."
-    )
-
-
-def _fetch_topaz_download_url(process_id: str, headers: dict[str, str]) -> str:
-    """Fetch and validate the signed download URL for a completed Topaz job.
-
-    Applies the SSRF allowlist (HTTPS + ``TOPAZ_DOWNLOAD_HOSTS``) before
-    returning the URL. Same split-try pattern as the submit block: network
-    errors first, then JSON parse errors with ``dl_resp`` provably bound.
-    """
-    try:
-        dl_resp = httpx.get(
-            f"{TOPAZ_BASE_URL}/download/{process_id}",
-            headers=headers,
-            timeout=15,
-        )
-        dl_resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise TopazAPIError(
-            f"Error getting Topaz download URL for job {process_id} (transport): {exc}"
-        ) from exc
-
-    try:
-        dl_payload = dl_resp.json()
-    except ValueError as exc:
-        raise TopazAPIError(
-            f"Topaz download URL response was non-JSON for job "
-            f"{process_id} (status={dl_resp.status_code}): {exc}; "
-            f"body[:200]={dl_resp.text[:200]!r}"
-        ) from exc
-
-    if not isinstance(dl_payload, dict):
-        raise TopazAPIError(
-            f"Topaz download URL response for job {process_id} was "
-            f"not a JSON object (got {type(dl_payload).__name__}): "
-            f"body[:200]={dl_resp.text[:200]!r}"
-        )
-
-    download_url = dl_payload.get("url")
-    # Require a non-empty string: a truthy non-string value (e.g. a JSON
-    # object/array) would otherwise reach urlparse() and raise TypeError,
-    # bypassing the typed TopazAPIError path.
-    if not isinstance(download_url, str) or not download_url:
-        raise TopazAPIError(
-            f"Topaz download response missing or non-string URL for job "
-            f"{process_id} (got {type(download_url).__name__})"
-        )
-
-    # #ASSUME: download_url is a valid HTTPS URL served from api.topazlabs.com
-    # or its CDN.
-    # #VERIFY -- Check Topaz CDN policy if an infrastructure change is announced.
-    _parsed = urlparse(download_url)
-    if _parsed.scheme != "https" or _parsed.hostname not in TOPAZ_DOWNLOAD_HOSTS:
-        raise TopazAPIError(f"Topaz returned unexpected download URL: {download_url!r}")
-    return download_url
-
-
-def _download_topaz_image(process_id: str, download_url: str) -> bytes:
-    """Download the enhanced image bytes from a validated Topaz download URL."""
-    try:
-        img_resp = httpx.get(download_url, timeout=120, follow_redirects=False)
-        img_resp.raise_for_status()
-        image_data = img_resp.content
-    except httpx.HTTPError as exc:
-        raise TopazAPIError(
-            f"Error downloading Topaz result for job {process_id}: {exc}"
-        ) from exc
-
-    if not image_data:
-        raise TopazAPIError(
-            f"Topaz download returned empty response for job {process_id}"
-        )
-    return image_data
-
-
-def _resolve_topaz_output_path(
-    input_path: Path, output_path: Path | None, image_data: bytes
-) -> Path:
-    """Pick the output path for a Topaz result, correcting the extension to the
-    actually-downloaded format (detected from magic bytes)."""
-    detected_ext = detect_image_format(image_data)
-    if output_path is None:
-        return input_path.parent / f"{input_path.stem}_topaz{detected_ext}"
-
-    user_ext = output_path.suffix.lower()
-    if user_ext not in _TOPAZ_OUTPUT_EXTENSIONS:
-        return output_path.with_suffix(detected_ext)
-    if user_ext != detected_ext:
-        log.warning(
-            f"Warning: specified extension {user_ext!r} does not match "
-            f"Topaz result {detected_ext!r}; correcting."
-        )
-        return output_path.with_suffix(detected_ext)
-    return output_path
-
-
-def topaz_enhance_image(
-    input_path: Path,
-    output_path: Path | None = None,
-    model: str = DEFAULT_TOPAZ_MODEL,
-    output_format: str = "png",
-    sharpen: float | None = None,
-    denoise: float | None = None,
-    face_enhancement: bool = False,
-    face_enhancement_strength: float | None = None,
-    verbose: bool = False,
-) -> Path:
-    """Enhance an image using the Topaz Labs API (async job with polling).
-
-    Precision models (Gigapixel family): 24 MP per credit.
-    Generative models (Wonder, Bloom): 2-4 MP per credit, significantly more expensive.
-
-    Raises:
-        ConfigError: invalid input arguments (unknown model, bad output
-            format, strength out of range, face-strength without face flag).
-        FileIOError: input file missing / not a regular file / over size cap,
-            or output write failure.
-        TopazAPIError: Topaz API transport, HTTP, JSON, or status failure;
-            also covers SSRF allowlist rejection and missing httpx runtime.
-    """
-    if not HTTPX_AVAILABLE:
-        raise TopazAPIError(
-            "'httpx' package is required for Topaz enhancement. "
-            "Install with: pip install httpx"
-        )
-
-    api_key = get_topaz_api_key()
-    if not api_key:
-        raise ConfigError(
-            "TOPAZ_API_KEY is not set. Set it via the environment or .env file."
-        )
-
+def _validate_topaz_input_file(input_path: Path) -> None:
+    """Validate the Topaz input file exists, is regular, and is within size limits."""
     # stat() also covers the "missing file" case via FileNotFoundError,
     # which is a subclass of OSError. The explicit exists() check was
     # redundant and made the FileNotFoundError branch unreachable.
@@ -553,6 +540,16 @@ def topaz_enhance_image(
             f"exceeds limit of {MAX_INPUT_IMAGE_BYTES} bytes."
         )
 
+
+def _validate_topaz_params(
+    model: str,
+    output_format: str,
+    sharpen: float | None,
+    denoise: float | None,
+    face_enhancement: bool,
+    face_enhancement_strength: float | None,
+) -> dict:
+    """Validate Topaz model/format/strength arguments; return the model config."""
     model_config = TOPAZ_MODELS.get(model)
     if model_config is None:
         raise ConfigError(
@@ -577,19 +574,18 @@ def topaz_enhance_image(
         raise ConfigError(
             "--topaz-face-strength requires --topaz-face-enhance to be set."
         )
+    return model_config
 
-    # #CRITICAL: API key sent as X-API-KEY header; never log headers containing this value.
-    # #VERIFY   -- Audit log handler config before enabling debug logging.
-    # #ASSUME: Topaz API at TOPAZ_BASE_URL accepts multipart/form-data for all model endpoints.
-    # #VERIFY   -- Check developer.topazlabs.com changelog before upgrading httpx.
-    # SSRF guard for the download step uses the module-level
-    # `TOPAZ_DOWNLOAD_HOSTS` allowlist.
-    headers = {"X-API-KEY": api_key}
-    endpoint_url = f"{TOPAZ_BASE_URL}/{model_config['endpoint']}"
 
-    if verbose:
-        print(f"Topaz enhance: {input_path.name} [{model}]")
-
+def _build_topaz_form_data(
+    model: str,
+    output_format: str,
+    sharpen: float | None,
+    denoise: float | None,
+    face_enhancement: bool,
+    face_enhancement_strength: float | None,
+) -> dict:
+    """Build the multipart form fields for a Topaz enhancement request."""
     data: dict = {"model": model, "output_format": output_format}
     if sharpen is not None:
         data["sharpen"] = sharpen
@@ -599,7 +595,17 @@ def topaz_enhance_image(
         data["face_enhancement"] = "true"
         if face_enhancement_strength is not None:
             data["face_enhancement_strength"] = face_enhancement_strength
+    return data
 
+
+def _topaz_submit_job(
+    endpoint_url: str,
+    headers: dict,
+    data: dict,
+    input_path: Path,
+    verbose: bool,
+) -> str:
+    """Submit the async Topaz job and return its process_id."""
     # Submit async job. Split into two try blocks:
     #   1. Network + file-read errors (httpx.HTTPError covers timeouts, HTTP
     #      status errors, transport failures; OSError covers input file read
@@ -654,15 +660,160 @@ def topaz_enhance_image(
         )
     if verbose:
         print(f"  Job submitted: {process_id}")
+    return process_id
 
-    # Poll until completion, then fetch + validate the download URL and pull
-    # the enhanced bytes. Each step raises a typed TopazAPIError on failure;
-    # see the extracted helpers above for the polling/SSRF details.
-    _poll_topaz_status(process_id, headers, verbose=verbose)
-    download_url = _fetch_topaz_download_url(process_id, headers)
-    image_data = _download_topaz_image(process_id, download_url)
 
-    output_path = _resolve_topaz_output_path(input_path, output_path, image_data)
+_TOPAZ_POLL_ITERATIONS = 25
+_TOPAZ_POLL_INITIAL_WAIT = 2.0
+_TOPAZ_POLL_429_MULTIPLIER = 2.0
+_TOPAZ_POLL_429_MAX_WAIT = 30.0
+_TOPAZ_POLL_DEFAULT_MULTIPLIER = 1.5
+_TOPAZ_POLL_DEFAULT_MAX_WAIT = 15.0
+
+
+def _topaz_poll_job(process_id: str, headers: dict, verbose: bool) -> None:
+    """Poll the Topaz job until it completes, fails, or the limit is reached."""
+    # #ASSUME: job completes within 25 poll iterations. Happy-path wall time is
+    # ~5 minutes (1.5x backoff capped at 15 s per iteration). Under sustained
+    # HTTP 429 backoff the 2x backoff caps at 30 s per iteration, so the
+    # worst-case wall time is ~12 minutes before the loop falls through to
+    # the "did not complete" branch.
+    # #VERIFY -- Confirm polling cap and the 30 s/15 s caps against Topaz
+    # SLA docs before changing the iteration count or the backoff factors.
+    # #EDGE: sustained 429 responses exhaust iterations and are reported as
+    # "did not complete".
+    # #VERIFY -- Test with mock that returns 429 indefinitely; confirm
+    # timeout message emitted (no separate exception type today).
+    wait = _TOPAZ_POLL_INITIAL_WAIT
+    for _ in range(_TOPAZ_POLL_ITERATIONS):
+        time.sleep(wait)
+        try:
+            status_resp = httpx.get(
+                f"{TOPAZ_BASE_URL}/status/{process_id}",
+                headers=headers,
+                timeout=15,
+            )
+            if status_resp.status_code == 429:
+                wait = min(wait * _TOPAZ_POLL_429_MULTIPLIER, _TOPAZ_POLL_429_MAX_WAIT)
+                continue
+            status_resp.raise_for_status()
+            status_payload = status_resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise TopazAPIError(
+                f"Error polling Topaz status for job {process_id}: {exc}"
+            ) from exc
+        if not isinstance(status_payload, dict):
+            raise TopazAPIError(
+                f"Topaz status response for job {process_id} was "
+                f"not a JSON object (got {type(status_payload).__name__})"
+            )
+        status = status_payload.get("status", "")
+        if verbose:
+            print(f"  Status: {status}")
+        if status == "Completed":
+            break
+        if status in ("Failed", "Error"):
+            raise TopazAPIError(f"Topaz job {process_id} failed (status: {status})")
+        wait = min(
+            wait * _TOPAZ_POLL_DEFAULT_MULTIPLIER,
+            _TOPAZ_POLL_DEFAULT_MAX_WAIT,
+        )
+    else:
+        raise TopazAPIError(
+            f"Topaz job {process_id} did not complete within the polling limit."
+        )
+
+
+def _poll_topaz_status(
+    process_id: str, headers: dict[str, str], *, verbose: bool
+) -> None:
+    """Compatibility wrapper exposing the Topaz polling helper."""
+    _topaz_poll_job(process_id, headers, verbose)
+
+
+def _topaz_get_download_url(process_id: str, headers: dict) -> str:
+    """Fetch and validate (HTTPS + host allowlist) the Topaz result download URL."""
+    # Get download URL -- same split-try pattern used in _topaz_submit_job:
+    # network errors first, then JSON parse errors with dl_resp provably bound.
+    try:
+        dl_resp = httpx.get(
+            f"{TOPAZ_BASE_URL}/download/{process_id}",
+            headers=headers,
+            timeout=15,
+        )
+        dl_resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise TopazAPIError(
+            f"Error getting Topaz download URL for job {process_id} (transport): {exc}"
+        ) from exc
+
+    try:
+        dl_payload = dl_resp.json()
+    except ValueError as exc:
+        raise TopazAPIError(
+            f"Topaz download URL response was non-JSON for job "
+            f"{process_id} (status={dl_resp.status_code}): {exc}; "
+            f"body[:200]={dl_resp.text[:200]!r}"
+        ) from exc
+
+    if not isinstance(dl_payload, dict):
+        raise TopazAPIError(
+            f"Topaz download URL response for job {process_id} was "
+            f"not a JSON object (got {type(dl_payload).__name__}): "
+            f"body[:200]={dl_resp.text[:200]!r}"
+        )
+
+    download_url = dl_payload.get("url")
+    if not download_url:
+        raise TopazAPIError(f"Topaz download response missing URL for job {process_id}")
+
+    # #ASSUME: download_url is a valid HTTPS URL served from api.topazlabs.com or its CDN.
+    # #VERIFY   -- Check Topaz CDN policy if infrastructure change announced.
+    _parsed = urlparse(download_url)
+    if _parsed.scheme != "https" or _parsed.hostname not in TOPAZ_DOWNLOAD_HOSTS:
+        raise TopazAPIError(f"Topaz returned unexpected download URL: {download_url!r}")
+    return download_url
+
+
+def _topaz_download_image(download_url: str, process_id: str) -> bytes:
+    """Download the enhanced image bytes from the validated Topaz URL."""
+    # Download the enhanced image
+    try:
+        img_resp = httpx.get(download_url, timeout=120, follow_redirects=False)
+        img_resp.raise_for_status()
+        image_data = img_resp.content
+    except httpx.HTTPError as exc:
+        raise TopazAPIError(
+            f"Error downloading Topaz result for job {process_id}: {exc}"
+        ) from exc
+
+    if not image_data:
+        raise TopazAPIError(
+            f"Topaz download returned empty response for job {process_id}"
+        )
+    return image_data
+
+
+def _finalize_topaz_output(
+    output_path: Path | None, input_path: Path, image_data: bytes
+) -> Path:
+    """Resolve the output path (correcting extension) and write the image."""
+    # Resolve output path
+    if output_path is None:
+        detected_ext = detect_image_format(image_data)
+        output_path = input_path.parent / f"{input_path.stem}_topaz{detected_ext}"
+    else:
+        # Correct extension if needed
+        detected_ext = detect_image_format(image_data)
+        user_ext = output_path.suffix.lower()
+        if user_ext not in (".png", ".jpg", ".jpeg", ".webp"):
+            output_path = output_path.with_suffix(detected_ext)
+        elif user_ext != detected_ext:
+            log.warning(
+                f"Warning: specified extension {user_ext!r} does not match "
+                f"Topaz result {detected_ext!r}; correcting."
+            )
+            output_path = output_path.with_suffix(detected_ext)
 
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -672,7 +823,78 @@ def topaz_enhance_image(
         raise FileIOError(
             f"Error writing Topaz output file {output_path}: {exc}"
         ) from exc
+    return output_path
 
+
+def topaz_enhance_image(
+    input_path: Path,
+    output_path: Path | None = None,
+    model: str = DEFAULT_TOPAZ_MODEL,
+    output_format: str = "png",
+    sharpen: float | None = None,
+    denoise: float | None = None,
+    face_enhancement: bool = False,
+    face_enhancement_strength: float | None = None,
+    verbose: bool = False,
+) -> Path:
+    """Enhance an image using the Topaz Labs API (async job with polling).
+
+    Precision models (Gigapixel family): 24 MP per credit.
+    Generative models (Wonder, Bloom): 2-4 MP per credit, significantly more expensive.
+
+    Raises:
+        ConfigError: invalid input arguments (unknown model, bad output
+            format, strength out of range, face-strength without face flag).
+        FileIOError: input file missing / not a regular file / over size cap,
+            or output write failure.
+        TopazAPIError: Topaz API transport, HTTP, JSON, or status failure;
+            also covers SSRF allowlist rejection and missing httpx runtime.
+    """
+    if not HTTPX_AVAILABLE:
+        raise TopazAPIError(
+            "'httpx' package is required for Topaz enhancement. "
+            "Install with: pip install httpx"
+        )
+
+    api_key = get_topaz_api_key()
+    if not api_key:
+        raise ConfigError(
+            "TOPAZ_API_KEY is not set. Set it via the environment or .env file."
+        )
+    _validate_topaz_input_file(input_path)
+    model_config = _validate_topaz_params(
+        model,
+        output_format,
+        sharpen,
+        denoise,
+        face_enhancement,
+        face_enhancement_strength,
+    )
+    # #CRITICAL: API key sent as X-API-KEY header; never log headers containing this value.
+    # #VERIFY   -- Audit log handler config before enabling debug logging.
+    # #ASSUME: Topaz API at TOPAZ_BASE_URL accepts multipart/form-data for all model endpoints.
+    # #VERIFY   -- Check developer.topazlabs.com changelog before upgrading httpx.
+    # SSRF guard for the download step uses the module-level
+    # `TOPAZ_DOWNLOAD_HOSTS` allowlist.
+    headers = {"X-API-KEY": api_key}
+    endpoint_url = f"{TOPAZ_BASE_URL}/{model_config['endpoint']}"
+
+    if verbose:
+        print(f"Topaz enhance: {input_path.name} [{model}]")
+
+    data = _build_topaz_form_data(
+        model,
+        output_format,
+        sharpen,
+        denoise,
+        face_enhancement,
+        face_enhancement_strength,
+    )
+    process_id = _topaz_submit_job(endpoint_url, headers, data, input_path, verbose)
+    _poll_topaz_status(process_id, headers, verbose=verbose)
+    download_url = _topaz_get_download_url(process_id, headers)
+    image_data = _topaz_download_image(download_url, process_id)
+    output_path = _finalize_topaz_output(output_path, input_path, image_data)
     print(f"Topaz result saved to: {output_path}")
     return output_path
 
@@ -691,23 +913,60 @@ def list_topaz_models() -> None:
     print()
 
 
-def load_image_bytes(image_path: Path) -> tuple[bytes, str]:
-    """Load an image file and return its raw bytes and detected MIME type.
+def detect_image_format(data: bytes) -> str:
+    """Detect actual image format from magic bytes.
 
-    Detects the actual image format from file contents (magic bytes), not the
-    file extension, to avoid MIME type mismatches.
+    Returns file extension (with dot) based on file signature.
+    """
+    # Check magic bytes (file signatures)
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:2] == b"\xff\xd8":
+        return ".jpg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    # Default to PNG if unknown
+    return ".png"
+
+
+def get_extension_for_mime(mime_type: str) -> str:
+    """Get file extension for a MIME type."""
+    mime_to_ext = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+    }
+    return mime_to_ext.get(mime_type, ".png")
+
+
+# Keep these names aligned with scripts._images for the re-export contract.
+detect_image_format = _images_module.detect_image_format  # noqa: F811
+get_extension_for_mime = _images_module.get_extension_for_mime  # noqa: F811
+
+
+def load_image_as_base64(image_path: Path) -> tuple[str, str]:
+    """Load an image file and return base64 data and mime type.
+
+    Detects actual image format from file contents (magic bytes),
+    not from file extension, to avoid MIME type mismatches.
 
     Enforces MAX_INPUT_IMAGE_BYTES to bound peak memory use when a caller
     points at an unexpectedly large file. Rejects non-regular files (FIFOs,
-    character devices like /dev/zero) where st_size is meaningless and would
-    bypass the size cap. Missing files raise FileNotFoundError (from stat) and
-    oversize / non-regular files raise ValueError; both are caught by the call
-    site in generate_image().
-
-    This is the preferred loader for callers that hand bytes straight to the
-    SDK (``types.Part.from_bytes``); :func:`load_image_as_base64` wraps it for
-    the rarer base64-string use case.
+    character devices like /dev/zero) where st_size is meaningless and
+    would bypass the size cap. Missing files raise FileNotFoundError (from
+    stat) and oversize / non-regular files raise ValueError; both are caught
+    by the call site in generate_image().
     """
+    raw_data, mime_type = load_image_bytes(image_path)
+    data = base64.standard_b64encode(raw_data).decode("utf-8")
+    return data, mime_type
+
+
+def load_image_bytes(image_path: Path) -> tuple[bytes, str]:
+    """Load an image file and return raw bytes plus detected MIME type."""
     resolved_stat = image_path.resolve().stat()
     if not stat.S_ISREG(resolved_stat.st_mode):
         raise ValueError(f"Reference image {image_path} is not a regular file.")
@@ -741,16 +1000,65 @@ def load_image_bytes(image_path: Path) -> tuple[bytes, str]:
     return raw_data, mime_type
 
 
-def load_image_as_base64(image_path: Path) -> tuple[str, str]:
-    """Load an image file and return base64-encoded data and mime type.
+def _build_detailed_entry(
+    image_path: Path,
+    model_key: str,
+    model_name: str,
+    timestamp: str,
+    prompt: str,
+    params_str: str,
+    rel_path: object,
+    reference_images: list[Path] | None,
+    is_draft: bool,
+    is_final: bool,
+    purpose: str | None,
+) -> str:
+    """Build the detailed PROMPTS.md entry block for one generated image."""
+    detailed_entry = f"""
+### {image_path.name}
 
-    Thin wrapper around :func:`load_image_bytes` retained for callers and tests
-    that want the base64 form. New code that passes bytes to the SDK should call
-    :func:`load_image_bytes` directly to avoid an encode/decode round-trip.
-    """
-    raw_data, mime_type = load_image_bytes(image_path)
-    data = base64.standard_b64encode(raw_data).decode("utf-8")
-    return data, mime_type
+- **Model**: {model_name} ({MODELS[model_key]["id"]})
+- **Date Generated**: {timestamp}
+"""
+
+    if reference_images:
+        detailed_entry += "- **Attachments**:\n"
+        for ref in reference_images:
+            detailed_entry += f"  - {ref.name}\n"
+
+    # Render the prompt as an indented code block. The detailed entry sits
+    # inside a Markdown list item ('- **Prompt**:'), whose content indent is
+    # column 2. Per CommonMark, an indented code block within a list item
+    # requires content-indent + 4 spaces = 6 spaces total. Using only 4 here
+    # would render as paragraph continuation, leaving triple-backtick fences
+    # in the prompt free to escape into rendered Markdown.
+    lines = prompt.splitlines() if prompt else []
+    indented_prompt = (
+        "\n".join("      " + line for line in lines) if lines else "      "
+    )
+    detailed_entry += f"""- **Prompt**:
+
+{indented_prompt}
+
+- **Parameters**: {params_str}
+"""
+
+    if purpose:
+        detailed_entry += f"- **Purpose**: {purpose}\n"
+
+    # Only document final images location (drafts are temporary)
+    if is_final:
+        detailed_entry += f"- **Location**: `{rel_path}`\n"
+
+    if is_draft:
+        detailed_entry += (
+            "- **Type**: Draft (temporary, will be removed after finalization)\n"
+        )
+    elif is_final:
+        detailed_entry += "- **Type**: Final (production ready)\n"
+
+    detailed_entry += "\n---\n"
+    return detailed_entry
 
 
 def document_image_prompt(
@@ -817,51 +1125,19 @@ This folder contains images generated by AI models. Each entry documents the mod
         new_row = f"| {rel_path} | {model_name} | {timestamp} | {prompt_short} | {params_str} |\n"
         content = content[:table_end] + new_row + content[table_end:]
 
-    # Build detailed entry matching web UI format
-    detailed_entry = f"""
-### {image_path.name}
-
-- **Model**: {model_name} ({MODELS[model_key]["id"]})
-- **Date Generated**: {timestamp}
-"""
-
-    if reference_images:
-        detailed_entry += "- **Attachments**:\n"
-        for ref in reference_images:
-            detailed_entry += f"  - {ref.name}\n"
-
-    # Render the prompt as an indented code block. The detailed entry sits
-    # inside a Markdown list item ('- **Prompt**:'), whose content indent is
-    # column 2. Per CommonMark, an indented code block within a list item
-    # requires content-indent + 4 spaces = 6 spaces total. Using only 4 here
-    # would render as paragraph continuation, leaving triple-backtick fences
-    # in the prompt free to escape into rendered Markdown.
-    lines = prompt.splitlines() if prompt else []
-    indented_prompt = (
-        "\n".join("      " + line for line in lines) if lines else "      "
+    detailed_entry = _build_detailed_entry(
+        image_path=image_path,
+        model_key=model_key,
+        model_name=model_name,
+        timestamp=timestamp,
+        prompt=prompt,
+        params_str=params_str,
+        rel_path=rel_path,
+        reference_images=reference_images,
+        is_draft=is_draft,
+        is_final=is_final,
+        purpose=purpose,
     )
-    detailed_entry += f"""- **Prompt**:
-
-{indented_prompt}
-
-- **Parameters**: {params_str}
-"""
-
-    if purpose:
-        detailed_entry += f"- **Purpose**: {purpose}\n"
-
-    # Only document final images location (drafts are temporary)
-    if is_final:
-        detailed_entry += f"- **Location**: `{rel_path}`\n"
-
-    if is_draft:
-        detailed_entry += (
-            "- **Type**: Draft (temporary, will be removed after finalization)\n"
-        )
-    elif is_final:
-        detailed_entry += "- **Type**: Final (production ready)\n"
-
-    detailed_entry += "\n---\n"
 
     # Append
     content += detailed_entry
@@ -874,14 +1150,8 @@ This folder contains images generated by AI models. Each entry documents the mod
         print("✓ Documented in PROMPTS.md")
 
 
-def _build_contents(prompt: str, reference_images: list[Path] | None) -> list | None:
-    """Build the Gemini ``contents`` list: reference-image parts + the prompt.
-
-    Reference images are loaded as raw bytes (no base64 round-trip) and handed
-    to ``types.Part.from_bytes``. Returns ``None`` if a provided reference image
-    cannot be loaded, which the caller surfaces as a soft failure (returns
-    ``None``), preserving the legacy behavior.
-    """
+def _build_reference_contents(reference_images: list[Path] | None) -> list | None:
+    """Build the content parts from reference images; None signals a load failure."""
     contents: list = []
     if reference_images:
         for img_path in reference_images:
@@ -891,45 +1161,27 @@ def _build_contents(prompt: str, reference_images: list[Path] | None) -> list | 
 
             print(f"Including reference image: {img_path}")
             try:
-                img_bytes, mime_type = load_image_bytes(img_path)
+                img_data, mime_type = load_image_as_base64(img_path)
             except (ValueError, OSError) as exc:
                 log.error(f"Error: cannot load reference image {img_path}: {exc}")
                 return None
-            contents.append(types.Part.from_bytes(data=img_bytes, mime_type=mime_type))
-
-    contents.append(prompt)
+            contents.append(
+                types.Part.from_bytes(
+                    data=base64.standard_b64decode(img_data),
+                    mime_type=mime_type,
+                )
+            )
     return contents
 
 
-def _build_generate_config(
-    model_config: dict[str, Any],
+def _apply_image_config(
+    model_config: dict,
     aspect_ratio: str | None,
     image_size: str | None,
-    *,
     use_search: bool,
-    thinking_level: str | None,
-) -> Any:
-    """Build the ``types.GenerateContentConfig`` for a generation request.
-
-    Emits user-facing warnings (to stdout) when aspect/size/thinking options
-    are passed to a model that cannot honor them, matching legacy behavior.
-    """
-    # Build config kwargs (heterogeneous: lists, dicts, model objects, bools).
-    # Annotated as ``dict[str, Any]`` so the static checker does not constrain
-    # later assignments to the initial value's type.
-    config_kwargs: dict[str, Any] = {
-        "response_modalities": ["IMAGE", "TEXT"],
-    }
-
-    # Warn when aspect/size are passed to a model that cannot honor them
-    # (e.g. legacy 'flash'). Without this, argparse's union choices accept the
-    # value but the API call silently drops it.
-    if not model_config.get("supports_image_config") and (aspect_ratio or image_size):
-        print(
-            f"Warning: {model_config['name']} does not support --aspect or --size;"
-            f" these flags will be ignored. Use --model flash-2 or pro for image_config control."
-        )
-
+    config_kwargs: dict,
+) -> None:
+    """Add image_config and search grounding to config_kwargs for capable models."""
     # Add image config for models that support it (pro, flash-2)
     if model_config.get("supports_image_config"):
         model_aspects = model_config.get("aspect_ratios", [])
@@ -962,6 +1214,11 @@ def _build_generate_config(
             config_kwargs["tools"] = [{"google_search": {}}]
             print("Google Search grounding: enabled")
 
+
+def _apply_thinking_config(
+    model_config: dict, thinking_level: str | None, config_kwargs: dict
+) -> None:
+    """Add thinking_config to config_kwargs for models that expose thinking_level."""
     # Add thinking config for models that expose thinking_level (flash-2 only).
     # #ASSUME -- google-genai >=2.2.0 accepts thinking_level as a string ("minimal"
     #            or "high"); the SDK normalizes to types.ThinkingLevel.HIGH /
@@ -993,66 +1250,299 @@ def _build_generate_config(
             )
             print(f"Thinking level: {thinking_level}")
 
+
+def _build_generate_config(
+    model_config: dict,
+    aspect_ratio: str | None,
+    image_size: str | None,
+    use_search: bool,
+    thinking_level: str | None,
+) -> Any:
+    """Assemble the GenerateContentConfig from the requested options."""
+    config_kwargs: dict[str, Any] = {
+        "response_modalities": ["IMAGE", "TEXT"],
+    }
+
+    # Warn when aspect/size are passed to a model that cannot honor them
+    # (e.g. legacy 'flash'). Without this, argparse's union choices accept the
+    # value but the API call silently drops it.
+    if not model_config.get("supports_image_config") and (aspect_ratio or image_size):
+        print(
+            f"Warning: {model_config['name']} does not support --aspect or --size;"
+            f" these flags will be ignored. Use --model flash-2 or pro for image_config control."
+        )
+
+    _apply_image_config(
+        model_config, aspect_ratio, image_size, use_search, config_kwargs
+    )
+    _apply_thinking_config(model_config, thinking_level, config_kwargs)
     return types.GenerateContentConfig(**config_kwargs)
 
 
-def _resolve_generated_output_path(
-    output_path: Path | None,
-    detected_ext: str,
-    script_dir: Path,
-    *,
-    is_draft: bool,
-) -> Path:
-    """Determine the on-disk path for a generated image.
-
-    Corrects the extension to the format detected from magic bytes and
-    re-anchors any path that does not already resolve under the repo-root
-    ``output/`` tree into ``output/drafts``, ``output/finals``, or ``output/``.
-    """
-    if output_path is None:
-        timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
-        # Random suffix makes default filenames non-guessable when the output/
-        # directory is later served or shared. Avoids reliance on
-        # second-resolution timestamps for uniqueness.
-        token = secrets.token_hex(16)
-        if is_draft:
-            return script_dir / f"output/drafts/draft_{timestamp}_{token}{detected_ext}"
-        return script_dir / f"output/generated_{timestamp}_{token}{detected_ext}"
-
-    # If user specified path, check if extension matches actual format
-    user_ext = output_path.suffix.lower()
-    if user_ext and user_ext != detected_ext:
-        # User specified different extension - correct it
-        print(
-            f"Warning: Specified extension {user_ext} doesn't match actual format {detected_ext}"
+def _validate_response_candidates(response: Any) -> Any:
+    """Return the first candidate content, raising GeminiAPIError on empty output."""
+    if not response.candidates:
+        feedback = getattr(response, "prompt_feedback", None)
+        raise GeminiAPIError(
+            f"Gemini returned no response candidates (prompt_feedback={feedback!r})."
         )
-        output_path = output_path.with_suffix(detected_ext)
-        print(f"  Saving as: {output_path.name}")
-    elif not user_ext:
-        # No extension specified - add the detected one
-        output_path = output_path.with_suffix(detected_ext)
 
-    # Re-anchor any path that does not already resolve to a subdirectory of the
-    # repo-root ``output/``. Resolving both sides avoids the prior
-    # ``str.startswith("output")`` check, which a path like
-    # ``output/../../../etc/cron.d/x`` would satisfy textually while resolving
-    # outside the tree.
+    candidate_content = response.candidates[0].content
+    if candidate_content is None:
+        feedback = getattr(response, "prompt_feedback", None)
+        raise GeminiAPIError(
+            "Gemini returned a candidate with no content "
+            "(typically a safety-filter refusal); "
+            f"prompt_feedback={feedback!r}."
+        )
+    return candidate_content
+
+
+def _save_thought_part(
+    part: Any,
+    thought_count: int,
+    save_thoughts: bool,
+    output_path: Path | None,
+    verbose: bool,
+) -> None:
+    """Print thought reasoning and, when requested, save the thought image."""
+    if verbose:
+        print(f"\n[Thought {thought_count}]")
+
+    # Handle thought text
+    if part.text is not None and verbose:
+        print(f"Reasoning: {part.text}")
+
+    # Handle thought image
+    if part.inline_data is not None and save_thoughts:
+        thought_data = part.inline_data.data
+        thought_mime = part.inline_data.mime_type
+        thought_ext = ".png" if "png" in thought_mime else ".jpg"
+
+        # Save thought image
+        if output_path:
+            thought_path = (
+                output_path.parent
+                / f"{output_path.stem}_thought{thought_count}{thought_ext}"
+            )
+        else:
+            # Anchor under {repo}/output rather than CWD so
+            # repeated runs (and the test suite) do not litter
+            # whichever directory the script was invoked from.
+            timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
+            token = secrets.token_hex(16)
+            thought_path = (
+                Path(__file__).parent.parent
+                / "output"
+                / f"thought{thought_count}_{timestamp}_{token}{thought_ext}"
+            )
+
+        thought_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(thought_path, "wb") as f:
+            f.write(thought_data)
+
+        print(f"Thought image {thought_count} saved to: {thought_path}")
+
+
+def _collect_response_parts(
+    candidate_content: Any,
+    save_thoughts: bool,
+    output_path: Path | None,
+    verbose: bool,
+) -> tuple:
+    """Walk response parts; return (image_data, mime_type, signature, thought_count)."""
+    thought_count = 0
+    final_image_data = None
+    final_mime_type = None
+    final_signature = None
+
+    for part in candidate_content.parts:
+        is_thought = hasattr(part, "thought") and part.thought
+
+        if is_thought:
+            thought_count += 1
+            _save_thought_part(part, thought_count, save_thoughts, output_path, verbose)
+        elif part.inline_data is not None:
+            final_image_data = part.inline_data.data
+            final_mime_type = part.inline_data.mime_type
+            _sig = getattr(part, "thought_signature", None)
+            if _sig:
+                final_signature = _sig
+                if verbose:
+                    print(f"\n[Thought Signature]: {final_signature[:100]}...")
+        elif part.text is not None:
+            print(f"\nModel response: {part.text}")
+            _sig = getattr(part, "thought_signature", None)
+            if _sig:
+                final_signature = _sig
+                if verbose:
+                    print(f"[Thought Signature]: {final_signature[:100]}...")
+
+    return final_image_data, final_mime_type, final_signature, thought_count
+
+
+def _reanchor_output_path(output_path: Path, is_draft: bool, script_dir: Path) -> Path:
+    """Re-anchor a user output path that resolves outside the repo output/ tree.
+
+    Security boundary: a user-supplied path like ``output/../../../etc/cron.d/x``
+    is textually rooted at ``output`` but resolves outside the tree. Resolving
+    both sides and comparing with ``is_relative_to`` (rather than a string
+    ``startswith`` check) is what closes that path-traversal gap; any path that
+    escapes ``script_dir/output`` is re-anchored back inside it by basename.
+    """
     allowed_root = (script_dir / "output").resolve()
     try:
         resolved_out = output_path.resolve()
-    except (OSError, RuntimeError):
-        # OSError: filesystem-level failures. RuntimeError: symlink loops
-        # (``Path.resolve`` raises this on an infinite resolution path). Either
-        # way, an unresolvable path is treated as "not under output/" and
-        # re-anchored into the safe tree below rather than crashing the CLI.
+    except OSError:
         resolved_out = None
     if resolved_out is None or not resolved_out.is_relative_to(allowed_root):
         if is_draft:
-            return script_dir / "output/drafts" / output_path.name
+            output_path = script_dir / "output/drafts" / output_path.name
         # Check if this looks like a final (contains "final" in name)
-        if "final" in output_path.stem.lower():
-            return script_dir / "output/finals" / output_path.name
-        return script_dir / "output" / output_path.name
+        elif "final" in output_path.stem.lower():
+            output_path = script_dir / "output/finals" / output_path.name
+        else:
+            output_path = script_dir / "output" / output_path.name
+    return output_path
+
+
+def _resolve_generated_output_path(
+    output_path: Path | None, detected_ext: str, is_draft: bool, script_dir: Path
+) -> Path:
+    """Determine the final output path, organizing drafts/finals and fixing the extension.
+
+    For a user-supplied path this also enforces the path-traversal boundary via
+    :func:`_reanchor_output_path`; the ``output_path is None`` branch builds a
+    safe path under ``output/`` directly and needs no re-anchoring.
+    """
+    if output_path is None:
+        timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
+        # Random suffix makes default filenames non-guessable when the
+        # output/ directory is later served or shared. Avoids reliance
+        # on second-resolution timestamps for uniqueness.
+        token = secrets.token_hex(16)
+        ext = detected_ext  # Use detected format, not MIME type
+
+        # Auto-organize: drafts go to drafts/, finals would go to root
+        if is_draft:
+            output_path = script_dir / f"output/drafts/draft_{timestamp}_{token}{ext}"
+        else:
+            output_path = script_dir / f"output/generated_{timestamp}_{token}{ext}"
+    else:
+        # If user specified path, check if extension matches actual format
+        user_ext = output_path.suffix.lower()
+        if user_ext and user_ext != detected_ext:
+            # User specified different extension - correct it
+            print(
+                f"Warning: Specified extension {user_ext} doesn't match actual format {detected_ext}"
+            )
+            output_path = output_path.with_suffix(detected_ext)
+            print(f"  Saving as: {output_path.name}")
+        elif not user_ext:
+            # No extension specified - add the detected one
+            output_path = output_path.with_suffix(detected_ext)
+        output_path = _reanchor_output_path(output_path, is_draft, script_dir)
+    return output_path
+
+
+def _write_generated_image(output_path: Path, final_image_data: bytes) -> None:
+    """Write the generated image bytes, raising FileIOError on disk failure."""
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(final_image_data)
+    except OSError as exc:
+        raise FileIOError(f"Failed to write image to {output_path}: {exc}") from exc
+
+
+def _document_generated_prompt(
+    output_path: Path,
+    prompt: str,
+    model_key: str,
+    aspect_ratio: str | None,
+    image_size: str | None,
+    reference_images: list[Path] | None,
+    is_draft: bool,
+) -> None:
+    """Record the generation in PROMPTS.md, tolerating a registry write failure."""
+    is_final_image = (
+        "final" in output_path.stem.lower() or output_path.parent.name == "finals"
+    )
+    try:
+        document_image_prompt(
+            image_path=output_path,
+            prompt=prompt,
+            model_key=model_key,
+            aspect_ratio=aspect_ratio,
+            image_size=image_size,
+            reference_images=reference_images,
+            is_draft=is_draft,
+            is_final=is_final_image,
+        )
+    except OSError as exc:
+        log.warning(
+            f"Warning: image saved to {output_path} but PROMPTS.md update failed: {exc}"
+        )
+
+
+def _save_final_image(
+    final_image_data: bytes,
+    final_mime_type: str | None,
+    final_signature: object,
+    thought_count: int,
+    output_path: Path | None,
+    is_draft: bool,
+    document_prompt: bool,
+    prompt: str,
+    model_key: str,
+    aspect_ratio: str | None,
+    image_size: str | None,
+    reference_images: list[Path] | None,
+    verbose: bool,
+) -> Path:
+    """Write the final image, optional signature sidecar, and registry entry."""
+    # Detect actual image format from magic bytes (more reliable than MIME type)
+    detected_ext = detect_image_format(final_image_data)
+
+    # Also check MIME type for comparison
+    mime_ext = get_extension_for_mime(final_mime_type) if final_mime_type else ".png"
+    if detected_ext != mime_ext:
+        print(
+            f"Note: API returned MIME type for {mime_ext}, but data is {detected_ext}"
+        )
+        print(f"  Using detected format: {detected_ext}")
+
+    script_dir = Path(__file__).parent.parent
+    output_path = _resolve_generated_output_path(
+        output_path, detected_ext, is_draft, script_dir
+    )
+    _write_generated_image(output_path, final_image_data)
+
+    if thought_count > 0:
+        print(f"\nProcessed {thought_count} thought step(s)")
+    print(f"Final image saved to: {output_path}")
+
+    if final_signature and verbose:
+        sig_path = output_path.with_suffix(".signature.bin")
+        with open(sig_path, "wb") as f:
+            # Signature is binary data
+            if isinstance(final_signature, bytes):
+                f.write(final_signature)
+            else:
+                f.write(str(final_signature).encode())
+        print(f"Thought signature saved to: {sig_path}")
+
+    if document_prompt:
+        _document_generated_prompt(
+            output_path,
+            prompt,
+            model_key,
+            aspect_ratio,
+            image_size,
+            reference_images,
+            is_draft,
+        )
+
     return output_path
 
 
@@ -1107,19 +1597,14 @@ def generate_image(
     # #VERIFY   -- Confirm GEMINI_API_KEY is not echoed in any log handler.
     client = genai.Client(api_key=api_key)
 
-    # Build the content parts (reference images + prompt). A failed reference
-    # load is a soft failure: _build_contents returns None and we propagate it.
-    contents = _build_contents(prompt, reference_images)
+    # Build the content parts (reference images + text prompt)
+    contents = _build_reference_contents(reference_images)
     if contents is None:
         return None
+    contents.append(prompt)
 
-    # Configure generation (aspect/size/search/thinking warnings emitted inside).
     generate_config = _build_generate_config(
-        model_config,
-        aspect_ratio,
-        image_size,
-        use_search=use_search,
-        thinking_level=thinking_level,
+        model_config, aspect_ratio, image_size, use_search, thinking_level
     )
 
     try:
@@ -1151,176 +1636,30 @@ def generate_image(
         #      reason).
         # In both cases ``prompt_feedback`` is included in the exception
         # message when present so the user can act on the refusal reason.
-        if not response.candidates:
-            feedback = getattr(response, "prompt_feedback", None)
-            raise GeminiAPIError(
-                "Gemini returned no response candidates "
-                f"(prompt_feedback={feedback!r})."
+        candidate_content = _validate_response_candidates(response)
+        final_image_data, final_mime_type, final_signature, thought_count = (
+            _collect_response_parts(
+                candidate_content, save_thoughts, output_path, verbose
             )
-
-        candidate_content = response.candidates[0].content
-        if candidate_content is None:
-            feedback = getattr(response, "prompt_feedback", None)
-            raise GeminiAPIError(
-                "Gemini returned a candidate with no content "
-                "(typically a safety-filter refusal); "
-                f"prompt_feedback={feedback!r}."
-            )
-
-        # Track thoughts and final images
-        thought_count = 0
-        final_image_data = None
-        final_mime_type = None
-        final_signature = None
-
-        # Process all parts in response
-        for part in candidate_content.parts:
-            # Check if this is a thought (intermediate reasoning step)
-            is_thought = hasattr(part, "thought") and part.thought
-
-            if is_thought:
-                thought_count += 1
-                if verbose:
-                    print(f"\n[Thought {thought_count}]")
-
-                # Handle thought text
-                if part.text is not None and verbose:
-                    print(f"Reasoning: {part.text}")
-
-                # Handle thought image
-                if part.inline_data is not None and save_thoughts:
-                    thought_data = part.inline_data.data
-                    thought_mime = part.inline_data.mime_type
-                    thought_ext = ".png" if "png" in thought_mime else ".jpg"
-
-                    # Save thought image
-                    if output_path:
-                        thought_path = (
-                            output_path.parent
-                            / f"{output_path.stem}_thought{thought_count}{thought_ext}"
-                        )
-                    else:
-                        # Anchor under {repo}/output rather than CWD so
-                        # repeated runs (and the test suite) do not litter
-                        # whichever directory the script was invoked from.
-                        timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
-                        token = secrets.token_hex(16)
-                        thought_path = (
-                            Path(__file__).parent.parent
-                            / "output"
-                            / f"thought{thought_count}_{timestamp}_{token}{thought_ext}"
-                        )
-
-                    thought_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(thought_path, "wb") as f:
-                        f.write(thought_data)
-
-                    print(f"Thought image {thought_count} saved to: {thought_path}")
-
-            # Non-thought content (final output)
-            elif part.inline_data is not None:
-                # Final image
-                final_image_data = part.inline_data.data
-                final_mime_type = part.inline_data.mime_type
-
-                # Extract thought signature if available
-                _sig = getattr(part, "thought_signature", None)
-                if _sig:
-                    final_signature = _sig
-                    if verbose:
-                        print(f"\n[Thought Signature]: {final_signature[:100]}...")
-
-            elif part.text is not None:
-                # Final text response
-                print(f"\nModel response: {part.text}")
-
-                # Extract thought signature from text part if available
-                _sig = getattr(part, "thought_signature", None)
-                if _sig:
-                    final_signature = _sig
-                    if verbose:
-                        print(f"[Thought Signature]: {final_signature[:100]}...")
+        )
 
         # Save final image
         if final_image_data is not None:
-            # Detect actual image format from magic bytes (more reliable than MIME type)
-            detected_ext = detect_image_format(final_image_data)
-
-            # Also check MIME type for comparison
-            mime_ext = (
-                get_extension_for_mime(final_mime_type) if final_mime_type else ".png"
+            return _save_final_image(
+                final_image_data,
+                final_mime_type,
+                final_signature,
+                thought_count,
+                output_path,
+                is_draft,
+                document_prompt,
+                prompt,
+                model_key,
+                aspect_ratio,
+                image_size,
+                reference_images,
+                verbose,
             )
-            if detected_ext != mime_ext:
-                print(
-                    f"Note: API returned MIME type for {mime_ext}, but data is {detected_ext}"
-                )
-                print(f"  Using detected format: {detected_ext}")
-
-            # Get script directory for output paths
-            script_dir = Path(__file__).parent.parent
-
-            # Determine output filename and auto-organize into drafts/finals,
-            # correcting the extension to the detected format.
-            output_path = _resolve_generated_output_path(
-                output_path, detected_ext, script_dir, is_draft=is_draft
-            )
-
-            # Ensure output directory exists and write the image. OSError
-            # here means a real disk-side failure (full disk, permission
-            # denied, missing parent on a read-only mount) -- surface as
-            # ``FileIOError`` rather than the generic ``GeminiAPIError`` so
-            # the user sees an accurate diagnosis.
-            try:
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(output_path, "wb") as f:
-                    f.write(final_image_data)
-            except OSError as exc:
-                raise FileIOError(
-                    f"Failed to write image to {output_path}: {exc}"
-                ) from exc
-
-            if thought_count > 0:
-                print(f"\nProcessed {thought_count} thought step(s)")
-            print(f"Final image saved to: {output_path}")
-
-            # Optionally save thought signature to sidecar file
-            if final_signature and verbose:
-                sig_path = output_path.with_suffix(".signature.bin")
-                with open(sig_path, "wb") as f:
-                    # Signature is binary data
-                    if isinstance(final_signature, bytes):
-                        f.write(final_signature)
-                    else:
-                        f.write(str(final_signature).encode())
-                print(f"Thought signature saved to: {sig_path}")
-
-            # Document prompt if requested. Wrap in its own guard so that a
-            # failure to update PROMPTS.md (disk full, encoding error in the
-            # escape logic, etc.) does not surface as "Error generating image"
-            # after the image has already been written to disk.
-            if document_prompt:
-                is_final_image = (
-                    "final" in output_path.stem.lower()
-                    or output_path.parent.name == "finals"
-                )
-                try:
-                    document_image_prompt(
-                        image_path=output_path,
-                        prompt=prompt,
-                        model_key=model_key,
-                        aspect_ratio=aspect_ratio,
-                        image_size=image_size,
-                        reference_images=reference_images,
-                        is_draft=is_draft,
-                        is_final=is_final_image,
-                    )
-                except OSError as exc:
-                    log.warning(
-                        f"Warning: image saved to {output_path} but PROMPTS.md "
-                        f"update failed: {exc}"
-                    )
-
-            return output_path
 
         raise GeminiAPIError(
             "Gemini response contained no inline image data; "
@@ -1465,12 +1804,8 @@ def list_models():
         print()
 
 
-def _build_arg_parser() -> argparse.ArgumentParser:
-    """Construct the argparse parser for the CLI.
-
-    Extracted from :func:`_run` so the (large) flag definitions live apart from
-    the dispatch logic and can be inspected/tested in isolation.
-    """
+def _build_argument_parser() -> argparse.ArgumentParser:
+    """Build and return the CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="Generate images using Google Gemini (Nano Banana / Nano Banana 2 / Nano Banana Pro)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1657,23 +1992,269 @@ Examples:
     return parser
 
 
+def _handle_list_flags(args: argparse.Namespace) -> bool:
+    """Handle --list-models / --list-topaz-models. Return True if handled."""
+    if args.list_models:
+        list_models()
+        return True
+    if args.list_topaz_models:
+        list_topaz_models()
+        return True
+    return False
+
+
+def _print_genai_missing() -> None:
+    """Print install guidance when the google-genai package is unavailable."""
+    print("Error: google-genai package not installed.")
+    print()
+    print("To install, create a virtual environment:")
+    print("  python3 -m venv .venv")
+    print("  source .venv/bin/activate")
+    print("  pip install google-genai")
+    print()
+    print("Or use uv:")
+    print("  uv venv && source .venv/bin/activate && uv pip install google-genai")
+
+
+def _topaz_from_args(
+    args: argparse.Namespace,
+    input_path: Path,
+    output_path: Path | None = None,
+) -> Path:
+    """Call topaz_enhance_image with the shared --topaz-* options read from args."""
+    return topaz_enhance_image(
+        input_path=input_path,
+        output_path=output_path,
+        model=args.topaz_model,
+        sharpen=args.topaz_sharpen,
+        denoise=args.topaz_denoise,
+        face_enhancement=args.topaz_face_enhance,
+        face_enhancement_strength=args.topaz_face_strength,
+        verbose=args.verbose,
+    )
+
+
+def _handle_enhance(args: argparse.Namespace) -> None:
+    """Standalone Topaz enhancement mode (--enhance); exits the process."""
+    _topaz_from_args(args, args.enhance, args.output)
+    sys.exit(0)
+
+
+def _resolve_finalize_output(args: argparse.Namespace) -> Path:
+    """Return the output path for finalize mode, defaulting next to the draft."""
+    if args.output:
+        return args.output
+    return args.finalize.parent / f"{args.finalize.stem}_final.png"
+
+
+def _finalize_via_topaz(args: argparse.Namespace, output_path: Path) -> None:
+    """Finalize a draft through Topaz (--finalize --topaz); exits the process."""
+    print(f"Finalizing draft image via Topaz: {args.finalize}")
+    print(f"Topaz model: {args.topaz_model}")
+    result = _topaz_from_args(args, args.finalize, output_path)
+
+    print(f"\n{'=' * 60}")
+    print("Topaz finalization complete!")
+    print(f"Draft: {args.finalize}")
+    print(f"Final: {result}")
+    print(f"{'=' * 60}")
+
+    sys.exit(0)
+
+
+def _finalize_via_gemini(args: argparse.Namespace, output_path: Path) -> None:
+    """Finalize a draft by regenerating at higher resolution; exits the process."""
+    final_size = args.size or "2K"
+    final_aspect = args.aspect or "16:9"
+
+    print(f"Finalizing draft image: {args.finalize}")
+    print(f"Target resolution: {final_size} ({final_aspect})")
+
+    prompts_file = Path(__file__).parent.parent / "examples" / "PROMPTS.md"
+    if prompts_file.exists():
+        with open(prompts_file, encoding="utf-8") as f:
+            content = f.read()
+            image_name = args.finalize.stem
+            if image_name in content:
+                print("Found original prompt in PROMPTS.md")
+                if not args.prompt:
+                    print(
+                        "\nNote: Use the same prompt as the draft, or provide a refinement prompt."
+                    )
+                    print(
+                        'Example: python scripts/generate_image.py --finalize draft.png "Same as draft"'
+                    )
+                    print("\nProceeding with reference-based upscaling...")
+
+    prompt = (
+        args.prompt
+        or "Recreate this image at higher resolution with the same composition, style, and details"
+    )
+
+    result = generate_image(
+        prompt=prompt,
+        model_key=args.model,
+        reference_images=[args.finalize],
+        output_path=output_path,
+        aspect_ratio=final_aspect,
+        image_size=final_size,
+        use_search=False,
+        save_thoughts=args.save_thoughts,
+        verbose=args.verbose,
+        thinking_level=args.thinking,
+    )
+
+    if result:
+        print(f"\n{'=' * 60}")
+        print("Finalization complete!")
+        print(f"Draft (1K): {args.finalize}")
+        print(f"Final ({final_size}): {result}")
+        print(f"{'=' * 60}")
+
+    sys.exit(0 if result else 1)
+
+
+def _handle_finalize(args: argparse.Namespace) -> None:
+    """Finalize mode (--finalize): upscale a draft to final resolution."""
+    if not args.finalize.exists():
+        print(f"Error: Draft image not found: {args.finalize}")
+        sys.exit(1)
+
+    output_path = _resolve_finalize_output(args)
+
+    if args.topaz:
+        _finalize_via_topaz(args, output_path)
+
+    _finalize_via_gemini(args, output_path)
+
+
+def _enhance_story_results(args: argparse.Namespace, results: list) -> list:
+    """Apply Topaz to each story image, recovering per image; return new paths."""
+    print(f"\nApplying Topaz enhancement to {len(results)} image(s)...")
+    enhanced = []
+    # Catch per-image so a single failure does not abort the batch.
+    # ConfigError propagates because misconfiguration applies to
+    # every image in the batch -- recovering would just produce
+    # N identical errors.
+    for path in results:
+        try:
+            enhanced.append(_topaz_from_args(args, path))
+        except (TopazAPIError, FileIOError) as exc:  # noqa: PERF203 - per-image recovery is the point of the loop
+            log.error(f"Topaz enhancement failed for {path}: {exc}")
+    return enhanced
+
+
+def _handle_story(args: argparse.Namespace) -> None:
+    """Story sequence mode (--story-parts); exits the process."""
+    if args.story_parts < 2:
+        print("Error: Story must have at least 2 parts")
+        sys.exit(1)
+
+    output_prefix = args.output or Path("story")
+
+    results = generate_story_sequence(
+        base_prompt=args.prompt,
+        num_parts=args.story_parts,
+        model_key=args.model,
+        output_prefix=output_prefix,
+        aspect_ratio=args.aspect,
+        image_size=args.size,
+        verbose=args.verbose,
+        thinking_level=args.thinking,
+    )
+
+    if args.topaz and results:
+        results = _enhance_story_results(args, results)
+
+    sys.exit(0 if len(results) == args.story_parts else 1)
+
+
+def _resolve_effective_size(args: argparse.Namespace) -> str | None:
+    """Pick the image size, applying draft-mode defaults read from MODELS."""
+    if not (args.draft_mode and args.size is None):
+        return args.size
+
+    # Draft mode picks the smallest tier the active model supports so
+    # iteration is fast and cheap. Capability is read from MODELS rather
+    # than hardcoded so a future model entry that adds 512 (or removes
+    # 1K) Just Works. Legacy 'flash' has no size control at all - we
+    # return None so generate_image() does not receive a bogus value
+    # (which would also trigger its "does not support --aspect or --size"
+    # warning misleadingly). A user-specified --size always wins above.
+    supported_sizes = MODELS[args.model].get("image_sizes", [])
+    if "512" in supported_sizes:
+        return "512"
+    if "1K" in supported_sizes:
+        return "1K"
+    return None
+
+
+def _print_draft_banner(args: argparse.Namespace, effective_size: str | None) -> None:
+    """Print the draft-mode banner before a single-image draft generation."""
+    if effective_size:
+        print(
+            f"Draft mode: Generating at {effective_size} resolution for fast iteration"
+        )
+    else:
+        print(
+            f"Draft mode: {MODELS[args.model]['name']} has no size control;"
+            " generating at the model's default resolution"
+        )
+    print("Drafts are stored in output/drafts/")
+    print("Use --finalize <draft_image.png> to upscale to final resolution\n")
+
+
+def _handle_single(args: argparse.Namespace) -> None:
+    """Single image mode (the default); exits the process."""
+    effective_size = _resolve_effective_size(args)
+
+    if args.draft_mode:
+        _print_draft_banner(args, effective_size)
+
+    result = generate_image(
+        prompt=args.prompt,
+        model_key=args.model,
+        reference_images=args.references,
+        output_path=args.output,
+        aspect_ratio=args.aspect,
+        image_size=effective_size,
+        use_search=args.search,
+        save_thoughts=args.save_thoughts,
+        verbose=args.verbose,
+        is_draft=args.draft_mode,
+        document_prompt=True,
+        thinking_level=args.thinking,
+    )
+
+    if result and args.topaz:
+        # Single-image path: typed AppError propagates to main(); on
+        # success ``topaz_enhance_image`` returns a Path. The ``result and
+        # args.topaz`` guard already short-circuits when generate_image
+        # returned None for a non-error empty-response path.
+        result = _topaz_from_args(args, result)
+
+    if result and args.draft_mode:
+        print(f"\n{'=' * 60}")
+        print("Draft complete! To finalize at higher resolution:")
+        print(f"  python scripts/generate_image.py --finalize {result} --size 2K")
+        print(f"  # Or with Topaz: --finalize {result} --topaz")
+        print(f"{'=' * 60}")
+
+    sys.exit(0 if result else 1)
+
+
 def _run() -> None:
     """CLI body. Raises ``AppError`` for expected failures and ``SystemExit``
     for terminal cases; :func:`main` is the user-facing entry point that
     translates ``AppError`` to a clean stderr message + exit code 1.
     """
-    parser = _build_arg_parser()
+    parser = _build_argument_parser()
     args = parser.parse_args()
 
     # Reconfigure structlog now that we know the verbosity flag.
     _configure_logging(verbose=bool(args.verbose))
 
-    if args.list_models:
-        list_models()
-        return
-
-    if args.list_topaz_models:
-        list_topaz_models()
+    if _handle_list_flags(args):
         return
 
     if not args.prompt and not args.finalize and not args.enhance:
@@ -1681,241 +2262,21 @@ def _run() -> None:
         sys.exit(1)
 
     # --- Standalone Topaz enhancement mode ---
-    # On failure, topaz_enhance_image raises a typed AppError that main()
-    # catches and surfaces as exit code 1; on success the function always
-    # returns a real Path, so a separate truthiness check is no longer
-    # needed.
     if args.enhance:
-        topaz_enhance_image(
-            input_path=args.enhance,
-            output_path=args.output,
-            model=args.topaz_model,
-            sharpen=args.topaz_sharpen,
-            denoise=args.topaz_denoise,
-            face_enhancement=args.topaz_face_enhance,
-            face_enhancement_strength=args.topaz_face_strength,
-            verbose=args.verbose,
-        )
-        sys.exit(0)
+        _handle_enhance(args)
 
     # Check for google-genai package
     if not GENAI_AVAILABLE:
-        print("Error: google-genai package not installed.")
-        print()
-        print("To install, create a virtual environment:")
-        print("  python3 -m venv .venv")
-        print("  source .venv/bin/activate")
-        print("  pip install google-genai")
-        print()
-        print("Or use uv:")
-        print("  uv venv && source .venv/bin/activate && uv pip install google-genai")
+        _print_genai_missing()
         sys.exit(1)
 
-    # Finalize mode - upscale a draft to final resolution
     if args.finalize:
-        if not args.finalize.exists():
-            print(f"Error: Draft image not found: {args.finalize}")
-            sys.exit(1)
+        _handle_finalize(args)
 
-        # Determine output path
-        if args.output:
-            output_path = args.output
-        else:
-            output_path = args.finalize.parent / f"{args.finalize.stem}_final.png"
-
-        # --- Topaz finalization path ---
-        # Same as the standalone --enhance branch: typed AppError on
-        # failure propagates to main(); on success result is a Path.
-        if args.topaz:
-            print(f"Finalizing draft image via Topaz: {args.finalize}")
-            print(f"Topaz model: {args.topaz_model}")
-            result = topaz_enhance_image(
-                input_path=args.finalize,
-                output_path=output_path,
-                model=args.topaz_model,
-                sharpen=args.topaz_sharpen,
-                denoise=args.topaz_denoise,
-                face_enhancement=args.topaz_face_enhance,
-                face_enhancement_strength=args.topaz_face_strength,
-                verbose=args.verbose,
-            )
-
-            print(f"\n{'=' * 60}")
-            print("Topaz finalization complete!")
-            print(f"Draft: {args.finalize}")
-            print(f"Final: {result}")
-            print(f"{'=' * 60}")
-
-            sys.exit(0)
-
-        # --- Gemini finalization path ---
-        final_size = args.size or "2K"
-        final_aspect = args.aspect or "16:9"
-
-        print(f"Finalizing draft image: {args.finalize}")
-        print(f"Target resolution: {final_size} ({final_aspect})")
-
-        prompts_file = Path(__file__).parent.parent / "examples" / "PROMPTS.md"
-        if prompts_file.exists():
-            with open(prompts_file, encoding="utf-8") as f:
-                content = f.read()
-                image_name = args.finalize.stem
-                if image_name in content:
-                    print("Found original prompt in PROMPTS.md")
-                    if not args.prompt:
-                        print(
-                            "\nNote: Use the same prompt as the draft, or provide a refinement prompt."
-                        )
-                        print(
-                            'Example: python scripts/generate_image.py --finalize draft.png "Same as draft"'
-                        )
-                        print("\nProceeding with reference-based upscaling...")
-
-        prompt = (
-            args.prompt
-            or "Recreate this image at higher resolution with the same composition, style, and details"
-        )
-
-        result = generate_image(
-            prompt=prompt,
-            model_key=args.model,
-            reference_images=[args.finalize],
-            output_path=output_path,
-            aspect_ratio=final_aspect,
-            image_size=final_size,
-            use_search=False,
-            save_thoughts=args.save_thoughts,
-            verbose=args.verbose,
-            thinking_level=args.thinking,
-        )
-
-        if result:
-            print(f"\n{'=' * 60}")
-            print("Finalization complete!")
-            print(f"Draft (1K): {args.finalize}")
-            print(f"Final ({final_size}): {result}")
-            print(f"{'=' * 60}")
-
-        sys.exit(0 if result else 1)
-
-    # Story sequence mode
     if args.story_parts:
-        if args.story_parts < 2:
-            print("Error: Story must have at least 2 parts")
-            sys.exit(1)
+        _handle_story(args)
 
-        output_prefix = args.output or Path("story")
-
-        results = generate_story_sequence(
-            base_prompt=args.prompt,
-            num_parts=args.story_parts,
-            model_key=args.model,
-            output_prefix=output_prefix,
-            aspect_ratio=args.aspect,
-            image_size=args.size,
-            verbose=args.verbose,
-            thinking_level=args.thinking,
-        )
-
-        if args.topaz and results:
-            print(f"\nApplying Topaz enhancement to {len(results)} image(s)...")
-            enhanced = []
-            # Catch per-image so a single failure does not abort the batch.
-            # ConfigError propagates because misconfiguration applies to
-            # every image in the batch -- recovering would just produce
-            # N identical errors.
-            for path in results:
-                try:
-                    enhanced.append(
-                        topaz_enhance_image(
-                            input_path=path,
-                            model=args.topaz_model,
-                            sharpen=args.topaz_sharpen,
-                            denoise=args.topaz_denoise,
-                            face_enhancement=args.topaz_face_enhance,
-                            face_enhancement_strength=args.topaz_face_strength,
-                            verbose=args.verbose,
-                        )
-                    )
-                except (TopazAPIError, FileIOError) as exc:  # noqa: PERF203 - per-image recovery is the point of the loop
-                    log.error(f"Topaz enhancement failed for {path}: {exc}")
-            results = enhanced
-
-        sys.exit(0 if len(results) == args.story_parts else 1)
-
-    # Single image mode
-    else:
-        # Draft mode picks the smallest tier the active model supports so
-        # iteration is fast and cheap. Capability is read from MODELS rather
-        # than hardcoded so a future model entry that adds 512 (or removes
-        # 1K) Just Works. Legacy 'flash' has no size control at all - we
-        # set effective_size=None so generate_image() does not receive a
-        # bogus value (which would also trigger its
-        # "does not support --aspect or --size" warning misleadingly).
-        # A user-specified --size always wins as an explicit override.
-        if args.draft_mode and args.size is None:
-            supported_sizes = MODELS[args.model].get("image_sizes", [])
-            if "512" in supported_sizes:
-                effective_size = "512"
-            elif "1K" in supported_sizes:
-                effective_size = "1K"
-            else:
-                effective_size = None
-        else:
-            effective_size = args.size
-
-        if args.draft_mode:
-            if effective_size:
-                print(
-                    f"Draft mode: Generating at {effective_size} resolution for fast iteration"
-                )
-            else:
-                print(
-                    f"Draft mode: {MODELS[args.model]['name']} has no size control;"
-                    " generating at the model's default resolution"
-                )
-            print("Drafts are stored in output/drafts/")
-            print("Use --finalize <draft_image.png> to upscale to final resolution\n")
-
-        result = generate_image(
-            prompt=args.prompt,
-            model_key=args.model,
-            reference_images=args.references,
-            output_path=args.output,
-            aspect_ratio=args.aspect,
-            image_size=effective_size,
-            use_search=args.search,
-            save_thoughts=args.save_thoughts,
-            verbose=args.verbose,
-            is_draft=args.draft_mode,
-            document_prompt=True,
-            thinking_level=args.thinking,
-        )
-
-        if result and args.topaz:
-            # Single-image path: typed AppError propagates to main(); on
-            # success ``topaz_enhance_image`` returns a Path. The previous
-            # ``result and args.topaz`` guard already short-circuits when
-            # generate_image returned None for a non-error empty-response
-            # path, so we do not need an extra except here.
-            result = topaz_enhance_image(
-                input_path=result,
-                model=args.topaz_model,
-                sharpen=args.topaz_sharpen,
-                denoise=args.topaz_denoise,
-                face_enhancement=args.topaz_face_enhance,
-                face_enhancement_strength=args.topaz_face_strength,
-                verbose=args.verbose,
-            )
-
-        if result and args.draft_mode:
-            print(f"\n{'=' * 60}")
-            print("Draft complete! To finalize at higher resolution:")
-            print(f"  python scripts/generate_image.py --finalize {result} --size 2K")
-            print(f"  # Or with Topaz: --finalize {result} --topaz")
-            print(f"{'=' * 60}")
-
-        sys.exit(0 if result else 1)
+    _handle_single(args)
 
 
 def main() -> None:
@@ -1928,11 +2289,6 @@ def main() -> None:
     prefix so users can distinguish "expected failure" from "this is a
     bug, please report it".
     """
-    # Configure logging up front (non-verbose default) so any error raised
-    # before ``_run`` re-configures with the parsed ``--verbose`` flag is still
-    # emitted through the structured stderr pipeline. Replaces the former
-    # import-time ``_configure_logging`` side effect.
-    _configure_logging(verbose=False)
     try:
         _run()
     except AppError as exc:

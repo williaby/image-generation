@@ -38,18 +38,11 @@ dev = [
     "basedpyright>=1.0.0",
     "ruff>=0.4.0",
     "pre-commit>=3.0.0",
-    # bandit[toml] so `bandit -c pyproject.toml` can parse the [tool.bandit]
-    # config on all supported Python versions (stdlib tomllib only exists on
-    # 3.11+; the toml extra supplies tomli below that). Matches the pre-commit
-    # bandit hook, which also installs bandit[toml].
-    "bandit[toml]>=1.7.5",
+    "bandit>=1.7.5",
     "pip-audit>=2.7.0",
     "hypothesis>=6.0.0,<7.0.0",
+    "pydoclint>=0.8.4",
 ]
-# interrogate and detect-secrets are intentionally NOT project dependencies:
-# interrogate pulls `py` (PYSEC-2022-42969, unmaintained, no fix), which would
-# fail the pip-audit gate. CI runs both as isolated tools via uvx (see ci.yml),
-# matching how pre-commit runs them in their own environments.
 
 [tool.ruff]
 line-length = 88
@@ -129,13 +122,13 @@ ignore = [
 # scripts/generate_image.py: CLI script with an extensive boolean flag API and
 #   dynamic try/except imports. The GCA-001 follow-on extracted helper functions
 #   and config/image-utility modules (_config.py, _images.py), materially
-#   reducing per-function complexity. C901 and PLR remain suppressed because
-#   residual complexity in topaz_enhance_image (C901 24), generate_image
-#   (C901 28), _run (C901 26), and others cannot be cleared without the
-#   separately-tracked FBT options-object refactor. PLR0913 fires on four
-#   functions with wide boolean-flag signatures; PLR0912/0915/2004 are residual
-#   in the same set. PTH123 (open() -> Path.open()) and D* (docstring style)
-#   are tracked separately. T20 (print) is expected for a CLI producing
+#   reducing per-function complexity. C901 (complexity) was removed after the
+#   hot functions were decomposed; N806 and PLW2901 were dropped once the file
+#   stopped triggering them (0 violations each). PLR remains suppressed because
+#   PLR0913 fires on four functions with wide boolean-flag signatures; clearing
+#   requires the separately-tracked FBT options-object refactor. PLR0912/0915/2004
+#   are residual in the same set. PTH123 (open() -> Path.open()) and D* (docstring
+#   style) are tracked separately. T20 (print) is expected for a CLI producing
 #   user-facing output.
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
@@ -168,8 +161,6 @@ ignore = [
     "ERA",                     # commented-out reference code retained
     "T20",                     # CLI tool -- print() is user-facing output, not debug
     "PTH123",                  # pathlib migration deferred to cleanup pass
-    "C901",                    # complexity in topaz_enhance_image (24), generate_image (28),
-                               # _run (26), _build_generate_config (12), document_image_prompt (12)
     "D",                       # docstring style cleanup tracked separately
     "ARG001",                  # unused arg tracked separately
     "ARG002",                  # unused method args (structlog logger shim methods)
@@ -237,3 +228,13 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "raise NotImplementedError",
 ]
+
+[tool.pydoclint]
+style = "google"
+exclude = '\.git|tests/|scripts/|benchmarks/|tools/|noxfile\.py|\.claude/'
+arg-type-hints-in-docstring = true
+arg-type-hints-in-signature = true
+skip-checking-raises = false
+require-return-section-when-returning-nothing = false
+require-return-section-when-returning-values = false
+require-yield-section-when-yielding-values = false
