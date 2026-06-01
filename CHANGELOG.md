@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (pre-commit, 2026-06-01)
+
+- Renovate config validator pre-commit hook (PC-015) pinned to
+  `renovate@42.92.14` to match the homelab self-hosted Renovate server.
+  Validates `renovate.json` before commit using the same major-version
+  validator, catching manager identifiers (e.g., `"uv"`) that the
+  homelab server rejects but v43+ silently accepts.
+
+### Fixed (pre-commit, 2026-06-01)
+
+- Added `# pragma: allowlist secret` to the `renovate-config-validator`
+  `rev:` SHA to prevent detect-secrets from flagging the 40-character
+  commit hash as a potential credential.
+
 ### Changed (dependency consolidation, 2026-05-29)
 
 - `pyproject.toml` is now the single dependency manifest. `requirements.txt`
