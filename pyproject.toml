@@ -41,6 +41,7 @@ dev = [
     "bandit>=1.7.5",
     "pip-audit>=2.7.0",
     "hypothesis>=6.0.0,<7.0.0",
+    "pydoclint>=0.8.4",
 ]
 
 [tool.ruff]
@@ -220,3 +221,13 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "raise NotImplementedError",
 ]
+
+[tool.pydoclint]
+style = "google"
+exclude = '\.git|tests/|scripts/|benchmarks/|tools/|noxfile\.py|\.claude/'
+arg-type-hints-in-docstring = true
+arg-type-hints-in-signature = true
+skip-checking-raises = false
+require-return-section-when-returning-nothing = false
+require-return-section-when-returning-values = false
+require-yield-section-when-yielding-values = false
