@@ -51,7 +51,7 @@ class TestLoadImageBytes:
         assert isinstance(data, bytes)
         assert mime == "image/png"
 
-    def test_oversize_raises_value_error(
+    def test_oversize_raises_file_io_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from scripts import generate_image as mod
@@ -60,7 +60,7 @@ class TestLoadImageBytes:
         big = tmp_path / "big.png"
         big.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
 
-        with pytest.raises(ValueError, match="exceeds limit"):
+        with pytest.raises(mod.FileIOError, match="exceeds limit"):
             mod.load_image_bytes(big)
 
     def test_base64_wrapper_matches_bytes_loader(self, tmp_path: Path) -> None:
