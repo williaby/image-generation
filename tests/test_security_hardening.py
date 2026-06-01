@@ -25,7 +25,7 @@ import pytest
 class TestLoadImageAsBase64SizeLimit:
     """load_image_as_base64 must reject inputs exceeding MAX_INPUT_IMAGE_BYTES."""
 
-    def test_oversize_reference_image_raises_value_error(
+    def test_oversize_reference_image_raises_file_io_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from scripts import generate_image as mod
@@ -34,7 +34,7 @@ class TestLoadImageAsBase64SizeLimit:
         large = tmp_path / "huge.png"
         large.write_bytes(b"x" * 32)
 
-        with pytest.raises(ValueError, match="exceeds limit"):
+        with pytest.raises(mod.FileIOError, match="exceeds limit"):
             mod.load_image_as_base64(large)
 
     def test_at_limit_boundary_does_not_raise(

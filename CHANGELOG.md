@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (audit cleanup, 2026-06-01)
+
+- Closed a time-of-check/time-of-use gap in `load_image_bytes`: the function now
+  resolves the path once and uses that resolved path for both the
+  `stat`-based validation and the read, bounds the read to
+  `MAX_INPUT_IMAGE_BYTES + 1`, and re-checks the length. This prevents a path
+  swap or post-`stat` file growth from bypassing the regular-file / size checks
+  and keeps peak memory bounded.
+- The verbose-only thought-signature sidecar write is now wrapped so an
+  `OSError` logs a non-fatal warning instead of turning a successful image save
+  into a fatal error.
+
+### Changed (audit cleanup, 2026-06-01)
+
+- `load_image_bytes` / `load_image_as_base64` now raise the typed `FileIOError`
+  (an `AppError` subclass) for non-regular, oversize, or unreadable reference
+  images instead of bare `ValueError` / `OSError`, so failures flow through the
+  CLI's structured-error handling.
+
+### Added (pre-commit, 2026-06-01)
+
+- Renovate config validator pre-commit hook (PC-015) pinned to
+  `renovate@42.92.14` to match the homelab self-hosted Renovate server.
+  Validates `renovate.json` before commit using the same major-version
+  validator, catching manager identifiers (e.g., `"uv"`) that the
+  homelab server rejects but v43+ silently accepts.
+
+### Fixed (pre-commit, 2026-06-01)
+
+- Added `# pragma: allowlist secret` to the `renovate-config-validator`
+  `rev:` SHA to prevent detect-secrets from flagging the 40-character
+  commit hash as a potential credential.
+
 ### Changed (dependency consolidation, 2026-05-29)
 
 - `pyproject.toml` is now the single dependency manifest. `requirements.txt`

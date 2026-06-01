@@ -56,7 +56,7 @@ for full tagging syntax and verification workflow.
 
 ## Essential commands
 
-- Run the script: `uv run scripts/generate_image.py --prompt "..."`
+- Run the script: `uv run scripts/generate_image.py "..."`
 - Run tests with coverage: `uv run pytest`
 - Format and lint: `uv run ruff format scripts tests && uv run ruff check scripts tests --fix`
 - Type check: `uv run basedpyright`

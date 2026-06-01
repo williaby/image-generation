@@ -112,6 +112,38 @@ class TestGetExtensionForMime:
         assert get_extension_for_mime("") == ".png"
 
 
+class TestGetMimeForExtension:
+    """get_mime_for_extension() maps dot-extensions back to MIME strings."""
+
+    @pytest.mark.parametrize(
+        ("ext", "mime"),
+        [
+            (".png", "image/png"),
+            (".jpg", "image/jpeg"),
+            (".gif", "image/gif"),
+            (".webp", "image/webp"),
+        ],
+    )
+    def test_known_extensions(self, ext: str, mime: str) -> None:
+        from scripts.generate_image import get_mime_for_extension
+
+        assert get_mime_for_extension(ext) == mime
+
+    def test_unknown_extension_returns_png_fallback(self) -> None:
+        from scripts.generate_image import get_mime_for_extension
+
+        assert get_mime_for_extension(".bin") == "image/png"
+
+    def test_ext_and_mime_maps_are_exact_inverses(self) -> None:
+        """MIME_TO_EXT must be the strict inverse of EXT_TO_MIME (no drift)."""
+        from scripts._images import EXT_TO_MIME, MIME_TO_EXT
+
+        inverted_ext_to_mime = {mime: ext for ext, mime in EXT_TO_MIME.items()}
+        inverted_mime_to_ext = {ext: mime for mime, ext in MIME_TO_EXT.items()}
+        assert inverted_ext_to_mime == MIME_TO_EXT
+        assert inverted_mime_to_ext == EXT_TO_MIME
+
+
 # ---------------------------------------------------------------------------
 # Tier 2: Settings / _load_api_key() -- pydantic-settings + .env loading
 # ---------------------------------------------------------------------------
@@ -1096,7 +1128,12 @@ class TestGenerateImageProModel:
             if hasattr(only_tool, "google_search")
             else only_tool["google_search"]
         )
-        assert google_search is not None
+        if isinstance(google_search, dict):
+            assert google_search == {}
+        else:
+            # Empty config is correct: grounding needs no parameters. A future failure
+            # here likely means the SDK added a default-populated field, not a real bug.
+            assert google_search.model_dump(exclude_none=True) == {}
 
     def test_invalid_aspect_ratio_warns_and_continues(
         self,
@@ -2449,6 +2486,68 @@ class TestGenerateImageNonBytesSignature:
         # Should have been encoded from string
         assert sig_file.read_bytes() == b"string-signature-value"
 
+    def test_signature_write_oserror_is_non_fatal(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A failed signature sidecar write warns but does not fail the image save."""
+        import builtins
+
+        import scripts.generate_image as mod
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+        img_inline = _make_fake_inline_data(_PNG_MAGIC, "image/png")
+        img_part = MagicMock()
+        img_part.inline_data = img_inline
+        img_part.text = None
+        img_part.thought = False
+        img_part.thought_signature = b"sigbytes"
+
+        fake_response = _make_fake_response([img_part])
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = fake_response
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        output_path = tmp_path / "output" / "sig_fail.png"
+        (tmp_path / "output").mkdir(parents=True, exist_ok=True)
+        fake_script = tmp_path / "scripts" / "generate_image.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+
+        real_open = builtins.open
+
+        def _open_failing_sidecar(file, *args, **kwargs):  # type: ignore[no-untyped-def]
+            # Only the signature sidecar write fails; the image write succeeds.
+            if str(file).endswith(".signature.bin"):
+                raise OSError("disk full")
+            return real_open(file, *args, **kwargs)
+
+        with (
+            patch.object(mod, "__file__", str(fake_script)),
+            patch("scripts.generate_image.genai.Client", mock_client_cls),
+            patch("scripts.generate_image._load_api_key", return_value="fake-key"),
+            patch("builtins.open", side_effect=_open_failing_sidecar),
+        ):
+            result = mod.generate_image(
+                prompt="Sidecar failure test",
+                model_key="flash",
+                output_path=output_path,
+                verbose=True,
+                document_prompt=False,
+            )
+
+        # The image save still succeeds; only the sidecar is skipped.
+        assert result is not None
+        assert result.exists()
+        sig_file = result.with_suffix(".signature.bin")
+        assert not sig_file.exists()
+        # The failure must be surfaced (warning to stderr), not silently dropped.
+        err = capsys.readouterr().err
+        assert "Could not write thought signature" in err
+
 
 # ---------------------------------------------------------------------------
 # Branch coverage: part loop edge cases
@@ -3689,8 +3788,8 @@ class TestSettingsLoaderEdgeCases:
                 raise OSError("simulated unreadable .env")
             return real_settings_cls(*args, **kwargs)
 
-        fake_settings = MagicMock(side_effect=settings_factory)
-        monkeypatch.setattr(mod, "Settings", fake_settings)
+        mock_settings_cls = MagicMock(side_effect=settings_factory)
+        monkeypatch.setattr(mod, "Settings", mock_settings_cls)
 
         settings = mod.get_settings()
 
@@ -3702,9 +3801,9 @@ class TestSettingsLoaderEdgeCases:
         # (None). This confirms the fallback loaded from the process env only,
         # not from any .env values.
         assert settings.TOPAZ_API_KEY is None
-        assert fake_settings.call_count == 2
+        assert mock_settings_cls.call_count == 2
         # Only the ``_env_file`` contract matters; tolerate future extra kwargs.
-        assert fake_settings.call_args.kwargs.get("_env_file") is None
+        assert mock_settings_cls.call_args.kwargs.get("_env_file") is None
         # The fallback must be announced. ``log`` writes via structlog's
         # _StderrLoggerFactory (not stdlib logging), so the warning lands on
         # stderr where capsys captures it -- caplog would not see it.

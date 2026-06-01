@@ -48,12 +48,10 @@ A specialized Claude agent for:
 git clone https://github.com/williaby/image-generation.git
 cd image-generation
 
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install dependency
-pip install google-genai
+# Install uv if not already present: https://docs.astral.sh/uv/
+# Sync all runtime and dev dependencies (declared in pyproject.toml) into a
+# managed virtual environment.
+uv sync --all-extras
 ```
 
 ### Set API Key
@@ -72,10 +70,10 @@ GEMINI_API_KEY=your-api-key
 
 ```bash
 # Basic generation
-python scripts/generate_image.py "A futuristic city at sunset"
+uv run scripts/generate_image.py "A futuristic city at sunset"
 
 # With options
-python scripts/generate_image.py \
+uv run scripts/generate_image.py \
   "Professional network architecture diagram" \
   --model pro \
   --aspect 16:9 \
@@ -87,20 +85,20 @@ python scripts/generate_image.py \
 
 ```bash
 # Step 1: Generate draft (1K, fast, cheap)
-python scripts/generate_image.py \
+uv run scripts/generate_image.py \
   "Network diagram showing VLAN segmentation" \
   --draft-mode \
   -o network_draft.png
 
 # Step 2: Iterate on draft
-python scripts/generate_image.py \
+uv run scripts/generate_image.py \
   "Make the firewall larger and add security icons" \
   -r output/drafts/network_draft.png \
   --draft-mode \
   -o network_draft_v2.png
 
 # Step 3: Finalize at higher resolution
-python scripts/generate_image.py \
+uv run scripts/generate_image.py \
   --finalize output/drafts/network_draft_v2.png \
   --size 2K \
   -o network_final.png
@@ -109,7 +107,7 @@ python scripts/generate_image.py \
 ## Command Reference
 
 ```bash
-python scripts/generate_image.py --help
+uv run scripts/generate_image.py --help
 
 # Key options:
 --model flash-2          # Nano Banana 2 / Gemini 3.1 Flash Image (default)
