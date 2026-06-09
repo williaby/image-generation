@@ -3,6 +3,7 @@
 name: Security Analysis
 
 on:
+  merge_group:
   push:
     branches: [main, master]
   pull_request:

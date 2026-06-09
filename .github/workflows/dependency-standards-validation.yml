@@ -10,6 +10,7 @@
 name: Dependency and Standards Validation
 
 on:
+  merge_group:
   pull_request:
   push:
     branches: [main]
