@@ -9,7 +9,9 @@ requires-python = ">=3.10,<3.15"
 dependencies = [
     "google-genai>=2.7.0,<3.0.0",
     "httpx>=0.27.0,<1.0.0",
-    "pydantic-settings>=2.0.0,<3.0.0",
+    # Floor raised to 2.14.2 to address GHSA-4xgf-cpjx-pc3j. Confirmed by
+    # uv run pip-audit.
+    "pydantic-settings>=2.14.2,<3.0.0",
     # Upper bound on next major; structlog processors and renderers form a
     # contract that historically changes at major versions, and silent log
     # misconfiguration is the most likely failure mode.
@@ -25,6 +27,14 @@ dependencies = [
     # via google-genai); the explicit floor ensures the resolver picks a patched
     # version. Confirmed by uv run pip-audit.
     "idna>=3.15,<4.0.0",
+    # Pinned to address GHSA-537c-gmf6-5ccf. Fixed in 48.0.1. cryptography is
+    # pulled transitively; the explicit floor ensures the resolver picks a
+    # patched version. Confirmed by uv run pip-audit.
+    "cryptography>=48.0.1",
+    # Pinned to address GHSA-6v7p-g79w-8964. Fixed in 1.2.1. msgpack is pulled
+    # transitively; the explicit floor ensures the resolver picks a patched
+    # version. Confirmed by uv run pip-audit.
+    "msgpack>=1.2.1",
 ]
 
 [project.urls]
@@ -43,6 +53,12 @@ dev = [
     "hypothesis>=6.0.0,<7.0.0",
     "pydoclint>=0.8.4",
 ]
+
+[tool.uv]
+# pip is pulled transitively (pip-api -> pip-audit, dev only). The constraint
+# raises the floor to 26.1.2 to address PYSEC-2026-196 without declaring pip as
+# a runtime dependency. Confirmed by uv run pip-audit.
+constraint-dependencies = ["pip>=26.1.2"]
 
 [tool.ruff]
 line-length = 88
