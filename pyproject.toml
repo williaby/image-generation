@@ -35,6 +35,7 @@ dependencies = [
     # transitively; the explicit floor ensures the resolver picks a patched
     # version. Confirmed by uv run pip-audit.
     "msgpack>=1.2.1",
+    "pillow>=12.2.0",
 ]
 
 [project.urls]
@@ -254,3 +255,8 @@ skip-checking-raises = false
 require-return-section-when-returning-nothing = false
 require-return-section-when-returning-values = false
 require-yield-section-when-yielding-values = false
+
+[dependency-groups]
+dev = [
+    "pytest-cov>=7.1.0",
+]
