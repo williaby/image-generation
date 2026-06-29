@@ -255,3 +255,8 @@ skip-checking-raises = false
 require-return-section-when-returning-nothing = false
 require-return-section-when-returning-values = false
 require-yield-section-when-yielding-values = false
+
+[dependency-groups]
+dev = [
+    "pytest-cov>=7.1.0",
+]
