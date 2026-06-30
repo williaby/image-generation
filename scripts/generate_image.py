@@ -403,7 +403,10 @@ def get_settings() -> Settings:
     unreadable stub file.
     """
     try:
-        return Settings()
+        # Resolve _ENV_FILE at call time (not at class-definition time, where
+        # SettingsConfigDict would freeze it) so the module-level path stays a
+        # live, monkeypatchable knob for tests and runtime reconfiguration.
+        return Settings(_env_file=_ENV_FILE)  # type: ignore[call-arg]
     except OSError as exc:
         log.warning(
             f"Could not read .env file at {_ENV_FILE}: {exc}; "

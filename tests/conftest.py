@@ -9,6 +9,8 @@ every test so that ``capsys``-based assertions on stderr log output keep
 working, mirroring the previous import-time behavior.
 """
 
+from pathlib import Path
+
 import pytest
 
 
@@ -23,3 +25,22 @@ def configure_logging():
     from scripts.generate_image import _configure_logging
 
     _configure_logging(verbose=False)
+
+
+@pytest.fixture(autouse=True)
+def isolate_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Point the module-level .env path at a nonexistent file for every test.
+
+    The developer's real repo-root .env must never leak into the suite. A real
+    GEMINI_API_KEY/TOPAZ_API_KEY there would otherwise override test
+    expectations, and a real .env read inside a ``patch("builtins.open")`` block
+    consumes a mocked side effect and feeds dotenv bytes (a string-vs-bytes
+    TypeError). Tests that need a .env override this by repointing
+    ``scripts.generate_image._ENV_FILE`` at their own temp file.
+
+    Effective only because ``get_settings()`` resolves ``_ENV_FILE`` at call
+    time; see that function in scripts/generate_image.py.
+    """
+    from scripts import generate_image as mod
+
+    monkeypatch.setattr(mod, "_ENV_FILE", tmp_path / ".env-does-not-exist")
