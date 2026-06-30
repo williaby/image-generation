@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (settings, 2026-06-30)
+
+- `get_settings()` now resolves `_ENV_FILE` at call time rather than at
+  class-definition time, so tests can monkeypatch `_ENV_FILE` without a
+  `SettingsConfigDict` freezing the path on import.
+
 ### Fixed (audit cleanup, 2026-06-01)
 
 - Closed a time-of-check/time-of-use gap in `load_image_bytes`: the function now

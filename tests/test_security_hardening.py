@@ -416,7 +416,7 @@ class TestDefaultFilenameRandomToken:
 
 
 class TestRejectNulByteInPathArgs:
-    """_reject_nul_byte_in_path_args surfaces embedded NUL bytes as FileIOError."""
+    """_reject_nul_byte_in_path_args surfaces embedded NUL bytes as ConfigError."""
 
     @staticmethod
     def _namespace(
@@ -454,7 +454,7 @@ class TestRejectNulByteInPathArgs:
 
         args = self._namespace()
         setattr(args, field, Path("evil\x00.png"))
-        with pytest.raises(mod.FileIOError, match="NUL byte"):
+        with pytest.raises(mod.ConfigError, match="NUL byte"):
             mod._reject_nul_byte_in_path_args(args)
 
     def test_nul_in_reference_list_raises(self, tmp_path: Path) -> None:
@@ -463,5 +463,27 @@ class TestRejectNulByteInPathArgs:
         args = self._namespace(
             references=[tmp_path / "ok.png", Path("bad\x00.png")],
         )
-        with pytest.raises(mod.FileIOError, match="NUL byte"):
+        with pytest.raises(mod.ConfigError, match="NUL byte"):
             mod._reject_nul_byte_in_path_args(args)
+
+    def test_nul_in_output_arg_wired_through_main(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """NUL byte in --output propagates through _run() to main() as exit code 1.
+
+        Verifies the call chain main() -> _run() -> _reject_nul_byte_in_path_args
+        is intact: the ConfigError raised by the guard must be caught by main()
+        and translated to a clean stderr message and SystemExit(1), not a traceback.
+        """
+        from scripts import generate_image as mod
+
+        monkeypatch.setattr(
+            "sys.argv", ["generate_image.py", "--output", "evil\x00.png", "a prompt"]
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            mod.main()
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "NUL" in err

@@ -59,7 +59,9 @@ trail.
 - **Suppression mechanism**: `.snyk` policy ignores are not supported for Snyk
   Code, so these are dismissed in the Snyk platform (Ignore -> "Won't fix /
   not vulnerable") rather than in-repo. Re-review if a network, server, or
-  upload surface is ever added. Reviewed 2026-06-29.
+  upload surface, or automation/CI context (scheduled runners, containerized
+  pipelines) where path arguments arrive from untrusted sources is ever added.
+  Reviewed 2026-06-29.
 
 ## Reporting a Vulnerability
 
