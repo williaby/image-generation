@@ -287,71 +287,6 @@ THINKING_LEVELS = ["minimal", "high"]
 # Topaz Labs API base URL
 TOPAZ_BASE_URL = "https://api.topazlabs.com/image/v1"
 
-# Topaz model registry: "enhance" -> /enhance/async; "enhance-gen" -> /enhance-gen/async
-# Generative models (Wonder, Bloom) cost ~6-12x more credits than precision models.
-TOPAZ_MODELS = {
-    # Gigapixel precision upscaling (24 MP per credit)
-    "Standard V2": {
-        "endpoint": "enhance/async",
-        "description": "Precision upscaling, best for most images",
-    },
-    "High Fidelity V2": {
-        "endpoint": "enhance/async",
-        "description": "Highest quality, preserves fine detail",
-    },
-    "Low Resolution V2": {
-        "endpoint": "enhance/async",
-        "description": "Optimized for very low-resolution sources",
-    },
-    "CGI": {
-        "endpoint": "enhance/async",
-        "description": "Optimized for CGI and rendered imagery",
-    },
-    "Text Refine": {
-        "endpoint": "enhance/async",
-        "description": "Preserves and sharpens text in diagrams",
-    },
-    "Detail Faces": {
-        "endpoint": "enhance/async",
-        "description": "Enhances facial clarity",
-    },
-    "Recover Faces": {
-        "endpoint": "enhance/async",
-        "description": "Restores damaged or degraded faces",
-    },
-    "Transparency Upscale": {
-        "endpoint": "enhance/async",
-        "description": "Upscales images with alpha transparency",
-    },
-    # Generative upscaling (4 MP per credit; significantly more expensive)
-    "Wonder": {
-        "endpoint": "enhance-gen/async",
-        "description": "Generative upscaling, adds intelligent detail",
-    },
-    "Wonder 2": {
-        "endpoint": "enhance-gen/async",
-        "description": "Improved generative upscaling",
-    },
-    "Standard Max": {
-        "endpoint": "enhance-gen/async",
-        "description": "Maximum quality generative upscaling",
-    },
-    "Recover 3": {
-        "endpoint": "enhance-gen/async",
-        "description": "Advanced recovery with generation",
-    },
-    "Redefine": {
-        "endpoint": "enhance-gen/async",
-        "description": "Creative reinterpretation with upscaling",
-    },
-    "Bloom": {
-        "endpoint": "enhance-gen/async",
-        "description": "Creative upscaling for AI-generated art",
-    },
-}
-
-DEFAULT_TOPAZ_MODEL = "Standard V2"
-
 
 # Repo-root .env path used by ``Settings``. Resolved at module import; the
 # pydantic-settings loader reads the file lazily when ``Settings()`` is
@@ -397,8 +332,15 @@ def get_settings() -> Settings:
     users who set keys via the process environment but happen to have an
     unreadable stub file.
     """
+    # CRITICAL: _ENV_FILE must be patched at mod._ENV_FILE, not via SettingsConfigDict,
+    # which freezes env_file at class-definition time and makes it un-monkeypatchable.
+    # ASSUME: conftest.isolate_dotenv autouse fixture patches mod._ENV_FILE before any test call.
+    # VERIFY: tests/conftest.py isolate_dotenv fixture; TestGetSettingsEnvFile in test_generate_image.py.
     try:
-        return Settings()
+        # Resolve _ENV_FILE at call time (not at class-definition time, where
+        # SettingsConfigDict would freeze it) so the module-level path stays a
+        # live, monkeypatchable knob for tests and runtime reconfiguration.
+        return Settings(_env_file=_ENV_FILE)  # type: ignore[call-arg]
     except OSError as exc:
         log.warning(
             f"Could not read .env file at {_ENV_FILE}: {exc}; "
@@ -923,11 +865,11 @@ def list_topaz_models() -> None:
     print("Available Topaz models:\n")
     print("  Precision upscaling (24 MP/credit):")
     for name, cfg in TOPAZ_MODELS.items():
-        if cfg["endpoint"] == "enhance/async":
+        if cfg["endpoint"] == _config_module.TOPAZ_ENDPOINT_ENHANCE:
             print(f"    {name:<22}  {cfg['description']}")
     print("\n  Generative upscaling (2-4 MP/credit, more expensive):")
     for name, cfg in TOPAZ_MODELS.items():
-        if cfg["endpoint"] == "enhance-gen/async":
+        if cfg["endpoint"] == _config_module.TOPAZ_ENDPOINT_ENHANCE_GEN:
             print(f"    {name:<22}  {cfg['description']}")
     print()
 
@@ -2271,6 +2213,28 @@ def _handle_single(args: argparse.Namespace) -> None:
     sys.exit(0 if result else 1)
 
 
+def _reject_nul_byte_in_path_args(args: argparse.Namespace) -> None:
+    """Reject NUL bytes in path-typed CLI arguments at the entry boundary.
+
+    Defense in depth only. This does not resolve or constrain paths, so it never
+    changes which file a valid path refers to; it surfaces an embedded NUL as a
+    typed :class:`ConfigError` (rather than a raw ``ValueError`` deep in an
+    ``open()`` call). The broader Snyk Code path-traversal findings on these
+    sinks are accepted under this project's threat model (see SECURITY.md): a
+    local single-user CLI has no trust boundary to cross.
+    """
+    # EDGE: Path("x\x00y") no longer raises ValueError at construction on Python 3.12+;
+    # str(path) catches NUL bytes on all platforms without relying on Path construction
+    # behavior. VERIFY: TestRejectNulByteInPathArgs in tests/test_security_hardening.py.
+    candidates: list[Path] = [
+        p for p in (args.output, args.finalize, args.enhance) if p is not None
+    ]
+    candidates.extend(args.references or ())
+    for path in candidates:
+        if "\x00" in str(path):
+            raise ConfigError(f"Invalid path (contains NUL byte): {path!r}")
+
+
 def _run() -> None:
     """CLI body. Raises ``AppError`` for expected failures and ``SystemExit``
     for terminal cases; :func:`main` is the user-facing entry point that
@@ -2278,6 +2242,7 @@ def _run() -> None:
     """
     parser = _build_argument_parser()
     args = parser.parse_args()
+    _reject_nul_byte_in_path_args(args)
 
     # Reconfigure structlog now that we know the verbosity flag.
     _configure_logging(verbose=bool(args.verbose))

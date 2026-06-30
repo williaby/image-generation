@@ -3782,9 +3782,13 @@ class TestSettingsLoaderEdgeCases:
         real_settings_cls = mod.Settings
 
         def settings_factory(*args: object, **kwargs: object) -> object:
-            # First call (loading the real .env) simulates an unreadable file;
-            # the fallback call passes ``_env_file=None`` and must succeed.
-            if "_env_file" not in kwargs:
+            # First call loads _ENV_FILE (a real path) and simulates an
+            # unreadable file; the fallback call passes ``_env_file=None`` and
+            # must succeed. get_settings() always passes _env_file explicitly,
+            # so the two calls are distinguished by None vs a real path.
+            # (Presence check `"_env_file" not in kwargs` would always be False
+            # since both calls always supply the keyword; None is the discriminant.)
+            if kwargs.get("_env_file") is not None:
                 raise OSError("simulated unreadable .env")
             return real_settings_cls(*args, **kwargs)
 

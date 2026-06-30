@@ -11,6 +11,7 @@ Style follows tests/test_generate_image.py: unittest.mock + tmp_path + monkeypat
 
 from __future__ import annotations
 
+import argparse
 import re
 from pathlib import Path
 from unittest.mock import patch
@@ -407,3 +408,82 @@ class TestDefaultFilenameRandomToken:
             f"story_<timestamp>_<token>_partN format; a refactor likely "
             f"dropped the secrets.token_hex(16) suffix"
         )
+
+
+# ---------------------------------------------------------------------------
+# NUL-byte rejection in path arguments (entry-boundary defense in depth)
+# ---------------------------------------------------------------------------
+
+
+class TestRejectNulByteInPathArgs:
+    """_reject_nul_byte_in_path_args surfaces embedded NUL bytes as ConfigError."""
+
+    @staticmethod
+    def _namespace(
+        *,
+        output: Path | None = None,
+        finalize: Path | None = None,
+        enhance: Path | None = None,
+        references: list[Path] | None = None,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            output=output,
+            finalize=finalize,
+            enhance=enhance,
+            references=references,
+        )
+
+    def test_clean_paths_pass(self, tmp_path: Path) -> None:
+        from scripts import generate_image as mod
+
+        args = self._namespace(
+            output=tmp_path / "out.png",
+            references=[tmp_path / "ref.png"],
+        )
+        # Must not raise for ordinary paths.
+        mod._reject_nul_byte_in_path_args(args)
+
+    def test_all_none_passes(self) -> None:
+        from scripts import generate_image as mod
+
+        mod._reject_nul_byte_in_path_args(self._namespace())
+
+    @pytest.mark.parametrize("field", ["output", "finalize", "enhance"])
+    def test_nul_in_scalar_path_raises(self, field: str) -> None:
+        from scripts import generate_image as mod
+
+        args = self._namespace()
+        setattr(args, field, Path("evil\x00.png"))
+        with pytest.raises(mod.ConfigError, match="NUL byte"):
+            mod._reject_nul_byte_in_path_args(args)
+
+    def test_nul_in_reference_list_raises(self, tmp_path: Path) -> None:
+        from scripts import generate_image as mod
+
+        args = self._namespace(
+            references=[tmp_path / "ok.png", Path("bad\x00.png")],
+        )
+        with pytest.raises(mod.ConfigError, match="NUL byte"):
+            mod._reject_nul_byte_in_path_args(args)
+
+    def test_nul_in_output_arg_wired_through_main(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """NUL byte in --output propagates through _run() to main() as exit code 1.
+
+        Verifies the call chain main() -> _run() -> _reject_nul_byte_in_path_args
+        is intact: the ConfigError raised by the guard must be caught by main()
+        and translated to a clean stderr message and SystemExit(1), not a traceback.
+        """
+        from scripts import generate_image as mod
+
+        monkeypatch.setattr(
+            "sys.argv", ["generate_image.py", "--output", "evil\x00.png", "a prompt"]
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            mod.main()
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "NUL" in err
