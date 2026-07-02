@@ -25,61 +25,39 @@
   "packageRules": [
     {
       "description": "Auto-merge GitHub Actions minor/patch updates",
-      "matchManagers": [
-        "github-actions"
-      ],
-      "matchUpdateTypes": [
-        "minor",
-        "patch"
-      ],
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch"],
       "automerge": true,
       "automergeType": "pr",
       "automergeStrategy": "squash"
     },
     {
       "description": "Group GitHub Actions updates",
-      "matchManagers": [
-        "github-actions"
-      ],
+      "matchManagers": ["github-actions"],
       "groupName": "GitHub Actions",
       "commitMessageTopic": "GitHub Actions"
     },
     {
       "description": "Pin GitHub Actions to commit SHA",
-      "matchManagers": [
-        "github-actions"
-      ],
+      "matchManagers": ["github-actions"],
       "pinDigests": true
     },
     {
       "description": "Name Python dependency PRs by package. pyproject.toml is the single dependency manifest (requirements.txt was removed to eliminate the cross-manifest version-skew class seen in PR #26 and PR #38), so only the pep621 manager is matched.",
-      "matchManagers": [
-        "pep621"
-      ],
+      "matchManagers": ["pep621"],
       "groupName": "Python dep {{depName}}",
       "commitMessageTopic": "Python dependency {{depName}}"
     },
     {
       "description": "Disable automated Python version (requires-python) updates; bump manually when ready",
-      "matchDepTypes": [
-        "requires-python"
-      ],
+      "matchDepTypes": ["requires-python"],
       "enabled": false,
-      "labels": [
-        "dependencies",
-        "python-version",
-        "breaking-change"
-      ]
+      "labels": ["dependencies", "python-version", "breaking-change"]
     },
     {
       "description": "Group SHA-pin refresh PRs for org reusable workflows. The retired v1 floating tag no longer exists; Renovate tracks the immutable vX.Y.Z release tags via semver. pinDigests (rule 3) handles the initial pin; this rule groups the refresh PRs for ByronWilliamsCPA/.github and williaby/.github so they do not generate noise as individual updates.",
-      "matchManagers": [
-        "github-actions"
-      ],
-      "matchPackageNames": [
-        "/ByronWilliamsCPA\\/\\.github/",
-        "/williaby\\/\\.github/"
-      ],
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["/ByronWilliamsCPA\\/\\.github/", "/williaby\\/\\.github/"],
       "groupName": "Org workflow SHA pins"
     }
   ],
@@ -90,9 +68,7 @@
   ],
   "lockFileMaintenance": {
     "enabled": true,
-    "schedule": [
-      "before 5am on monday"
-    ],
+    "schedule": ["before 5am on monday"],
     "commitMessageAction": "Refresh"
   },
   "separateMajorMinor": true,
@@ -104,15 +80,9 @@
   "rangeStrategy": "bump",
   "vulnerabilityAlerts": {
     "enabled": true,
-    "labels": [
-      "security"
-    ],
-    "assignees": [
-      "ByronWilliamsCPA"
-    ],
-    "reviewers": [
-      "ByronWilliamsCPA"
-    ]
+    "labels": ["security"],
+    "assignees": ["ByronWilliamsCPA"],
+    "reviewers": ["ByronWilliamsCPA"]
   },
   "osvVulnerabilityAlerts": true,
   "transitiveRemediation": true
