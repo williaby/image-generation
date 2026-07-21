@@ -27,6 +27,6 @@ jobs:
       id-token: write
       contents: read
       actions: read
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-scorecard.yml@4b12bfe9a94a312be1f23cf7a591e6259ea96118  # main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-scorecard.yml@7d12f5486ab5c856397ebaa4acd3c99ca385227c  # main
     with:
       publish-results: true
