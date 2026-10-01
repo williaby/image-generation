@@ -59,6 +59,14 @@
       "matchManagers": ["github-actions"],
       "matchPackageNames": ["/ByronWilliamsCPA\\/\\.github/", "/williaby\\/\\.github/"],
       "groupName": "Org workflow SHA pins"
+    },
+    {
+      "description": "Lock file maintenance has no release timestamp, so the global minimumReleaseAge would hold it on stability-days forever (timestamp-required since Renovate 42).",
+      "matchUpdateTypes": ["lockFileMaintenance"],
+      "minimumReleaseAge": null,
+      "prBodyNotes": [
+        "Renovate cannot validate Minimum Release Age for lock file maintenance; the package manager resolves the new versions. Review the lock diff before merging."
+      ]
     }
   ],
   "enabledManagers": [
@@ -68,8 +76,7 @@
   ],
   "lockFileMaintenance": {
     "enabled": true,
-    "schedule": ["before 5am on monday"],
-    "commitMessageAction": "Refresh"
+    "schedule": ["before 5am on monday"]
   },
   "separateMajorMinor": true,
   "separateMinorPatch": false,
