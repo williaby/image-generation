@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (dependencies, 2026-10-31)
+
+- Dropped Python 3.10 support (end of life): `requires-python` is now
+  `>=3.11,<3.15`, ruff `target-version` is `py311`, and basedpyright
+  `pythonVersion` is `3.11`. The 3.10 resolution was pinned to filelock 4.1.0,
+  which carries 17 open advisories and has no patched release for 3.10.
+- Refreshed `uv.lock` to clear all pip-audit, Grype and Dependency Review
+  findings. `datetime.UTC` is now imported directly.
+
 ### Fixed (settings, 2026-06-30)
 
 - `get_settings()` now resolves `_ENV_FILE` at call time rather than at

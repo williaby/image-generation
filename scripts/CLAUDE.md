@@ -88,6 +88,7 @@ Environment configuration is loaded via `pydantic-settings`:
 ```python
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings): ...
 ```
 
