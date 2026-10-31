@@ -55,7 +55,7 @@
       "labels": ["dependencies", "python-version", "breaking-change"]
     },
     {
-      "description": "Refresh SHA pins for org reusable workflows that float the v1 tag. pinDigests (rule 3) handles the initial pin; this rule groups the digest-refresh PRs for ByronWilliamsCPA/.github and williaby/.github so they don't generate noise as individual updates.",
+      "description": "Group SHA-pin refresh PRs for org reusable workflows. The retired v1 floating tag no longer exists; Renovate tracks the immutable vX.Y.Z release tags via semver. pinDigests (rule 3) handles the initial pin; this rule groups the refresh PRs for ByronWilliamsCPA/.github and williaby/.github so they do not generate noise as individual updates.",
       "matchManagers": ["github-actions"],
       "matchPackageNames": ["/ByronWilliamsCPA\\/\\.github/", "/williaby\\/\\.github/"],
       "groupName": "Org workflow SHA pins"
