@@ -40,10 +40,10 @@ jobs:
     uses: ByronWilliamsCPA/.github/.github/workflows/python-compatibility.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
     with:
       # Matrix kept in lockstep with pyproject.toml
-      # `requires-python = ">=3.10,<3.15"` (widened from `>=3.12` in the
+      # `requires-python = ">=3.11,<3.15"` (widened from `>=3.12` in the
       # 2026-05 compliance sweep, GCA-006). 3.12 and 3.13 are the in-CI cells
       # because both have stable wheels for google-genai, httpx, and pydantic-
-      # settings; 3.10/3.11 are supported but only smoke-tested via uv resolves
+      # settings; 3.11 is supported but only smoke-tested via uv resolves
       # locally to keep the cross-OS matrix tractable.
       python-versions: '["3.12", "3.13"]'
       operating-systems: '["ubuntu-latest"]'
