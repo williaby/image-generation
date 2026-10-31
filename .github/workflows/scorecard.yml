@@ -16,6 +16,9 @@ on:
       - master
   workflow_dispatch:
 
+# Limit cache access for the low-trust trigger; the reusable workflow only restores.
+cache-mode: read
+
 permissions:
   contents: read
 
@@ -27,6 +30,6 @@ jobs:
       id-token: write
       contents: read
       actions: read
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-scorecard.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-scorecard.yml@82ce497cae146787ea65bf892aedfe3262a4638e  # main
     with:
       publish-results: true
