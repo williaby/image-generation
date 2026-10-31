@@ -69,7 +69,7 @@ import stat
 import sys
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -81,12 +81,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scripts import _config as _config_module
 from scripts import _images as _images_module
-
-# Compatibility shim for the ``datetime.UTC`` constant. Python 3.11 added
-# ``datetime.UTC`` as an alias for ``datetime.timezone.utc``; we target
-# 3.10+, so use the older spelling and expose ``UTC`` here for the rest of
-# the module to import.
-UTC = timezone.utc
 
 # Hard cap on reference / enhancement input image size. 4K PNGs are ~10 MiB;
 # 100 MiB is generous and protects against pathological local inputs that would
@@ -2109,7 +2103,7 @@ def _enhance_story_results(args: argparse.Namespace, results: list) -> list:
     for path in results:
         try:
             enhanced.append(_topaz_from_args(args, path))
-        except (TopazAPIError, FileIOError) as exc:  # noqa: PERF203 - per-image recovery is the point of the loop
+        except (TopazAPIError, FileIOError) as exc:
             log.error(f"Topaz enhancement failed for {path}: {exc}")
     return enhanced
 
