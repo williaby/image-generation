@@ -32,6 +32,7 @@ than at module level:
 ```python
 def test_something(self, tmp_path: Path) -> None:
     from scripts import generate_image as mod
+
     ...
 ```
 
