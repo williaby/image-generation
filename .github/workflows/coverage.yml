@@ -15,6 +15,9 @@ on:
         required: false
         type: string
 
+# Limit cache access for the low-trust trigger; the reusable workflow only restores.
+cache-mode: read
+
 permissions:
   contents: read
   actions: read
@@ -23,7 +26,7 @@ jobs:
   upload-coverage:
     name: Upload Coverage to Qlty
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-qlty-coverage.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-qlty-coverage.yml@82ce497cae146787ea65bf892aedfe3262a4638e  # main
     with:
       coverage-artifact-name: coverage-reports
       coverage-file-path: coverage.xml
