@@ -16,6 +16,9 @@ on:
       - master
   workflow_dispatch:
 
+# Limit cache access for the low-trust trigger; the reusable workflow only restores.
+cache-mode: read
+
 permissions:
   contents: read
 

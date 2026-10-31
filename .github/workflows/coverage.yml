@@ -15,6 +15,9 @@ on:
         required: false
         type: string
 
+# Limit cache access for the low-trust trigger; the reusable workflow only restores.
+cache-mode: read
+
 permissions:
   contents: read
   actions: read
